@@ -1,5 +1,9 @@
 # contractful-ts
 
+[![CI](https://github.com/shubhamtaywade82/contractful-ts/actions/workflows/ci.yml/badge.svg)](https://github.com/shubhamtaywade82/contractful-ts/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](./package.json)
+
 **Contract-first HTTP client for TypeScript.** Declare the HTTP shape of an API — verb, path, typed parameters, expected responses — and get fully typed client methods with validation, auth, retries, circuit breakers and rate limiting. Ships with an OpenAPI → contract generator (`contractful-gen`) in the spirit of [binance-connector-js](https://github.com/binance/binance-connector-js).
 
 This is the TypeScript sibling of the Ruby gem [contractful](https://github.com/shubhamtaywade82/contractful):
