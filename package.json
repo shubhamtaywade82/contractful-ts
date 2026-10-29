@@ -1,0 +1,61 @@
+{
+  "name": "contractful-ts",
+  "version": "0.1.0",
+  "description": "Contract-first HTTP client for TypeScript. Declare the HTTP shape of an API; get typed client methods with validation, auth, retries, circuit breakers and rate limiting. Includes an OpenAPI -> contract code generator.",
+  "keywords": [
+    "contract-first",
+    "api-client",
+    "http-client",
+    "openapi",
+    "codegen",
+    "connector",
+    "validation",
+    "typescript"
+  ],
+  "license": "MIT",
+  "author": "contractful-ts contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shubhamtaywade82/contractful-ts"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "contractful-gen": "./dist/codegen/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./codegen": {
+      "types": "./dist/codegen/index.d.ts",
+      "default": "./dist/codegen/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && vitest run",
+    "test:watch": "vitest",
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "prepublishOnly": "npm run build && vitest run"
+  },
+  "dependencies": {
+    "axios": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
