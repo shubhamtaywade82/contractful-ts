@@ -24,7 +24,7 @@ import { emitContracts, type EmitOptions, type EmittedFile } from './emitter.js'
 import { parseYaml, YamlParseError, type YamlLine } from './yaml.js';
 
 export { loadSpec, parseSpecText, buildApiIR, dereference, readSourceText, OpenApiError, toCamelCase, toPascalCase, toKebabCase, sanitizeGroup, sanitizeIdentifier, uniqueName, schemaFrom } from './openapi.js';
-export type { OpenApiSpec, Json, JsonRecord, ApiIR, ApiGroupIR, OperationIR, ParamIR, ResponseIR, SchemaIR, BuildIROptions, ParamLocationIR } from './openapi.js';
+export type { OpenApiSpec, Json, JsonRecord, ApiIR, ApiGroupIR, OperationIR, ParamIR, ResponseIR, SchemaIR, BuildIROptions, ParamLocationIR, SecuritySchemeIR } from './openapi.js';
 export { emitContracts } from './emitter.js';
 export type { EmitOptions, EmittedFile } from './emitter.js';
 export { parseYaml, YamlParseError } from './yaml.js';
@@ -42,11 +42,11 @@ export {
   parseModel,
   mergeModels,
 } from './model.js';
-export type { SpecKind, CanonicalModel, ChannelIR, ChannelGroupIR, EventsIR } from './model.js';
+export type { SpecKind, CanonicalModel, ChannelIR, ChannelGroupIR, ChannelMessageIR, EventsIR } from './model.js';
 
 /* AsyncAPI --------------------------------------------------------------- */
-export { loadAsyncApiSpec, buildEventsIR, AsyncApiError } from './asyncapi.js';
-export type { AsyncApiPerspective, BuildEventsIROptions } from './asyncapi.js';
+export { loadAsyncApiSpec, buildEventsIR, AsyncApiError, normalizeEventName } from './asyncapi.js';
+export type { AsyncApiPerspective, BuildEventsIROptions, EventNamingOptions } from './asyncapi.js';
 
 /* Events emitter --------------------------------------------------------- */
 export { emitEvents } from './events-emit.js';
@@ -65,7 +65,7 @@ export type { GraphQLEmitOptions } from './graphql-emit.js';
 export { emitStandaloneHttp, emitStandaloneEvents } from './standalone.js';
 
 /* Config runner ----------------------------------------------------------- */
-export { loadCodegenConfig, runCodegen, dumpModels } from './config.js';
+export { loadCodegenConfig, runCodegen, dumpModels, generatorVersion, hashSource } from './config.js';
 export type { CodegenConfig, CodegenSource, GeneratedBundle } from './config.js';
 
 export interface GenerateOptions extends BuildIROptions, Omit<EmitOptions, 'specOrigin'> {}

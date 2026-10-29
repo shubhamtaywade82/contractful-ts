@@ -136,6 +136,12 @@ export interface HttpStatusErrorOptions {
   declared?: boolean;
   /** Parsed `Retry-After` header in milliseconds, when present. */
   retryAfterMs?: number;
+  /** Request method, for richer auth error messages. */
+  method?: string;
+  /** Request path, for richer auth error messages. */
+  path?: string;
+  /** Full request URL, for richer auth error messages. */
+  url?: string;
 }
 
 /**
@@ -183,6 +189,31 @@ export class RateLimitError extends HttpStatusError {
       ...options,
       status: 429,
     });
+  }
+}
+
+/**
+ * The terminal form of an HTTP 401: the server rejected the credentials and
+ * no (further) refresh was possible (no refresh hook, or the single refresh
+ * retry was exhausted). Carries the status, body and headers of the
+ * offending response.
+ */
+export class AuthenticationError extends HttpStatusError {
+  constructor(options: HttpStatusErrorOptions) {
+    const target = [options.method, options.path ?? options.url].filter(Boolean).join(' ');
+    super(`Authentication failed (401)${target ? ` for ${target}` : ''}`, { ...options, status: 401 });
+  }
+}
+
+/**
+ * HTTP 403 — the credentials are valid but lack permission. Deliberately
+ * *not* auto-refreshed: retrying with fresh tokens of the same principal
+ * cannot fix an authorization decision.
+ */
+export class AuthorizationError extends HttpStatusError {
+  constructor(options: HttpStatusErrorOptions) {
+    const target = [options.method, options.path ?? options.url].filter(Boolean).join(' ');
+    super(`Forbidden (403)${target ? ` for ${target}` : ''}`, { ...options, status: 403 });
   }
 }
 
@@ -264,6 +295,69 @@ export class EventsConnectionError extends EventsError {
   }
 }
 
+export interface WebSocketApiErrorOptions {
+  /** WebSocket close code, e.g. `4001` (token expired). */
+  code?: number;
+  /** Close reason supplied by the server. */
+  reason?: string;
+  /** Channel / topic the connection was serving, when known. */
+  channel?: string;
+  cause?: unknown;
+}
+
+/**
+ * The WebSocket counterpart of {@link HttpStatusError}: the server closed the
+ * connection with a meaningful close code (authentication, authorization,
+ * policy, ...). Private-use codes `4000`–`4999` are convention.
+ */
+export class WebSocketApiError extends EventsError {
+  readonly code?: number;
+  readonly reason?: string;
+  readonly channel?: string;
+
+  constructor(message: string, options: WebSocketApiErrorOptions = {}) {
+    super(message, { cause: options.cause, retryable: false });
+    this.code = options.code;
+    this.reason = options.reason;
+    this.channel = options.channel;
+  }
+
+  override toJSON(): Record<string, unknown> {
+    return { ...super.toJSON(), code: this.code, reason: this.reason, channel: this.channel };
+  }
+}
+
+/**
+ * Conventional private-use WebSocket close codes (range 4000–4999) shared by
+ * the client and the server. `shouldReconnectOnClose` implements the policy:
+ * token expiry is recoverable (refresh + reconnect); authorization failures
+ * are terminal.
+ */
+export const WS_CLOSE_CODES = {
+  /** Client-side: no frame within the heartbeat liveness window. */
+  HEARTBEAT_TIMEOUT: 4000,
+  /** Server-side: the presented token has expired. */
+  TOKEN_EXPIRED: 4001,
+  /** Client-side: the upgrade did not complete within the connect timeout. */
+  CONNECT_TIMEOUT: 4002,
+  /** Server-side: the presented credentials were rejected. */
+  UNAUTHORIZED: 4003,
+  /** Server-side: valid credentials, insufficient permission. */
+  FORBIDDEN: 4004,
+} as const;
+
+/**
+ * Close-code reconnect policy. `4001` (token expired) reconnects after a
+ * refresh; `4003`/`4004` are terminal authorization decisions; everything
+ * else (abnormal closes, restarts, ...) reconnects with backoff.
+ */
+export function shouldReconnectOnClose(code: number | undefined): boolean {
+  if (code === WS_CLOSE_CODES.TOKEN_EXPIRED) return true;
+  if (code === WS_CLOSE_CODES.UNAUTHORIZED) return false;
+  if (code === WS_CLOSE_CODES.FORBIDDEN) return false;
+  return true;
+}
+
 export interface MessageShapeErrorOptions {
   topic: string | null;
   violations: Violation[];
@@ -299,6 +393,47 @@ export class GraphQLError extends ContractfulError {
     super(`GraphQL operation failed: ${JSON.stringify(errors)}`, { retryable: false });
     this.errors = errors;
   }
+}
+
+/**
+ * The transport-agnostic error taxonomy from the platform client design:
+ * `errorKind(err)` maps any thrown value onto it so consumers can route
+ * handling consistently across HTTP and WebSocket surfaces.
+ */
+export type ApiClientErrorKind =
+  | 'authentication'
+  | 'authorization'
+  | 'validation'
+  | 'network'
+  | 'timeout'
+  | 'server'
+  | 'websocket'
+  | 'unknown';
+
+/** Classifies any thrown value into the {@link ApiClientErrorKind} taxonomy. */
+export function errorKind(err: unknown): ApiClientErrorKind {
+  if (err instanceof AuthenticationError || err instanceof AuthError) return 'authentication';
+  if (err instanceof AuthorizationError) return 'authorization';
+  if (
+    err instanceof ContractViolationError ||
+    err instanceof ContractDefinitionError ||
+    err instanceof ResponseShapeError ||
+    err instanceof MessageShapeError
+  ) {
+    return 'validation';
+  }
+  if (err instanceof TimeoutError) return 'timeout';
+  if (err instanceof CircuitOpenError || err instanceof QueueFullError) return 'network';
+  if (err instanceof TransportError) return 'network';
+  if (err instanceof GraphQLError) return 'server';
+  if (err instanceof EventsError) return 'websocket';
+  if (err instanceof HttpStatusError) {
+    if (err.status === 408) return 'timeout';
+    if (err.status === 429) return 'network';
+    return err.status >= 500 ? 'server' : 'validation';
+  }
+  if (err instanceof RequestAbortedError) return 'network';
+  return 'unknown';
 }
 
 /** Inspects an unknown thrown value and returns the library error it represents. */

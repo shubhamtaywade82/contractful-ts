@@ -1,6 +1,6 @@
 {
   "name": "contractful-ts",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Contract-first HTTP and WebSocket client for TypeScript. Declare the shape of an API; get typed client methods with validation, auth, retries, circuit breakers and rate limiting. Generates clients from OpenAPI, AsyncAPI, Postman Collections and GraphQL SDL.",
   "keywords": [
     "contract-first",

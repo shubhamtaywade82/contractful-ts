@@ -8,6 +8,8 @@
  */
 
 import {
+  AuthenticationError,
+  AuthorizationError,
   HttpStatusError,
   RateLimitError,
   ResponseShapeError,
@@ -81,7 +83,8 @@ export interface ResponseOutcome {
  * declarations and either returns the body or throws the appropriate error:
  *
  * - undeclared / declared-error statuses → {@link HttpStatusError}
- *   (HTTP 429 specifically → {@link RateLimitError})
+ *   (HTTP 401 → {@link AuthenticationError}, 403 → {@link AuthorizationError},
+ *   429 → {@link RateLimitError})
  * - top-level type mismatch on a declared success → {@link ResponseShapeError}
  */
 export function validateResponse(
@@ -146,6 +149,14 @@ function httpErrorFor(
 
   if (res.status === 429) {
     return new RateLimitError(base);
+  }
+
+  if (res.status === 401) {
+    return new AuthenticationError(base);
+  }
+
+  if (res.status === 403) {
+    return new AuthorizationError(base);
   }
 
   const note = opts.note ? ` (${opts.note})` : '';

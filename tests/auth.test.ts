@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { auth, createClientCredentialsProvider } from '../src/middleware/auth.js';
-import type { AuthContext } from '../src/middleware/auth.js';
+import type { AuthSurface } from '../src/middleware/auth.js';
 
-function ctx(): AuthContext {
+function ctx(): AuthSurface {
   return { headers: {}, query: new URLSearchParams() };
 }
 

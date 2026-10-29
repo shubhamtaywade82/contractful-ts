@@ -52,6 +52,7 @@ export {
 
 export type {
   EventsConnectionState,
+  EventEnvelope,
   MessageHandler,
   SocketFactory,
   SocketLike,

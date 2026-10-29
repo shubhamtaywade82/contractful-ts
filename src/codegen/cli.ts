@@ -31,12 +31,14 @@ import { emitGraphqlFromSdl } from './graphql-emit.js';
 import { detectSpecKind } from './detect.js';
 import {
   dumpModels,
+  generatorVersion,
+  hashSource,
   loadCodegenConfig,
   runCodegen,
 } from './config.js';
 import { httpIrFromModel, modelFromHttpIr, parseModel, serializeModel, type CanonicalModel } from './model.js';
 
-const VERSION = '0.2.0';
+const VERSION = generatorVersion();
 
 interface CliArgs {
   spec?: string;
@@ -49,6 +51,11 @@ interface CliArgs {
   namespace?: string;
   emit?: 'runtime' | 'standalone';
   perspective?: 'server' | 'client';
+  eventNameStyle?: 'dot.case' | 'kebab-case' | 'keep';
+  handlerPrefix?: string;
+  stripVersion?: boolean;
+  clientName?: string;
+  noPlatform?: boolean;
   config?: string;
   dumpModel?: string;
   help?: boolean;
@@ -125,6 +132,26 @@ function parseArgs(argv: string[]): CliArgs {
         args.perspective = value;
         break;
       }
+      case '--event-name-style': {
+        const value = next();
+        if (value !== 'dot.case' && value !== 'kebab-case' && value !== 'keep') {
+          fail(`--event-name-style must be 'dot.case', 'kebab-case' or 'keep', got ${JSON.stringify(value)}`);
+        }
+        args.eventNameStyle = value;
+        break;
+      }
+      case '--handler-prefix':
+        args.handlerPrefix = next();
+        break;
+      case '--strip-version':
+        args.stripVersion = true;
+        break;
+      case '--client-name':
+        args.clientName = next();
+        break;
+      case '--no-platform':
+        args.noPlatform = true;
+        break;
       case '--config':
       case '-c':
         args.config = next();
@@ -179,6 +206,11 @@ function printHelp(): void {
       '  --import-from, -i <pkg>     Module specifier used in imports (default: contractful-ts)',
       '  --group-by, -g <mode>       Group HTTP contracts by "tag" (default) or "path"',
       '  --perspective <p>           AsyncAPI direction: server (default) | client',
+      '  --event-name-style <style>   Event naming: dot.case | kebab-case | keep (default)',
+      '  --handler-prefix <prefix>    Subscribe-method prefix (default: on)',
+      '  --strip-version              Drop v<n> segments from derived event names',
+      '  --client-name <name>         X-Client-Name identity for the platform facade',
+      '  --no-platform                Skip platform.ts (auto-emitted when REST + events exist)',
       '  --max-per-file <n>          Split large groups into files of at most n operations',
       '  --dump-model <file>         Write the canonical model as JSON instead of code',
       '  --help, -h                  Show this help',
@@ -225,6 +257,16 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
     if (args.groupBy) config.groupBy = args.groupBy;
     if (args.maxPerFile !== undefined) config.maxPerFile = args.maxPerFile;
     if (args.perspective) config.asyncapiPerspective = args.perspective;
+    if (args.eventNameStyle || args.handlerPrefix || args.stripVersion) {
+      config.naming = {
+        ...config.naming,
+        ...(args.eventNameStyle ? { eventNameStyle: args.eventNameStyle } : {}),
+        ...(args.handlerPrefix ? { handlerPrefix: args.handlerPrefix } : {}),
+        ...(args.stripVersion ? { stripVersion: true } : {}),
+      };
+    }
+    if (args.clientName) config.clientName = args.clientName;
+    if (args.noPlatform) config.platform = false;
 
     process.stderr.write(`contractful-gen: running config ${args.config} (${config.sources.length} source(s)) ...\n`);
     const bundle = await runCodegen(config).catch((err: unknown) => {
@@ -267,7 +309,13 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
 
   const importFrom = args.importFrom;
   const specOrigin = args.spec;
-  const emitOptions = { importFrom, specOrigin, maxPerFile: args.maxPerFile };
+  const emitOptions = {
+    importFrom,
+    specOrigin,
+    maxPerFile: args.maxPerFile,
+    sourceHash: hashSource(text),
+    generatorVersion: VERSION,
+  };
   const outDir = resolve(args.out);
   const prefix = args.namespace ? `${args.namespace}/` : '';
 
@@ -306,7 +354,18 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
       const spec = await loadSpec(args.spec).catch((err: unknown) => {
         fail(err instanceof Error ? err.message : String(err));
       });
-      const ir = buildEventsIR(spec, { perspective: args.perspective, url: args.base });
+      const ir = buildEventsIR(spec, {
+        perspective: args.perspective,
+        url: args.base,
+        naming:
+          args.eventNameStyle || args.handlerPrefix || args.stripVersion
+            ? {
+                eventNameStyle: args.eventNameStyle,
+                handlerPrefix: args.handlerPrefix,
+                stripVersion: args.stripVersion,
+              }
+            : undefined,
+      });
       const files = emitEvents(ir, emitOptions);
       await writeFiles(outDir, files.map(withPrefix(prefix)));
       const channels = ir.groups.reduce((sum, g) => sum + g.channels.length, 0);

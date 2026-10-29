@@ -14,6 +14,14 @@ export const ordersApi = defineApi({
         quantity: P.integer({ required: true, in: "body", min: 1, max: 99 }),
       },
       responds: [{ status: 201, type: "hash" }, { status: 422 }],
+      security: ["OAuth2", "orders:write"],
+    }),
+    showOrder: contract("GET /orders/:orderId", {
+      params: {
+        orderId: P.string({ required: true }),
+      },
+      responds: [{ status: 200, type: "hash" }],
+      security: ["OAuth2", "orders:read"],
     }),
   },
 });

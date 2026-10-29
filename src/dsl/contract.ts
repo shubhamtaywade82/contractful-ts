@@ -39,6 +39,12 @@ export interface ContractOptions<P extends ParamsShape> {
   retries?: number;
   /** Per-contract base retry delay in milliseconds. */
   retryDelay?: number;
+  /**
+   * Security requirement(s) forwarded to the auth provider (e.g. OAuth
+   * scopes) — generated from OpenAPI `security` / AsyncAPI `security`.
+   * Purely declarative metadata: the resolver decides what to do with it.
+   */
+  security?: readonly string[];
 }
 
 /** A contract value: route + options plus phantom types for inference. */

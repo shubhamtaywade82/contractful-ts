@@ -139,7 +139,7 @@ describe('buildEventsIR (AsyncAPI 2.x)', () => {
     expect(channel.name).toBe('onUserUserIdNotification'); // on + Pascal(channel label)
   });
 
-  it('supports oneOf messages as separate channels on one topic', () => {
+  it('collapses oneOf messages into one typed-union channel (envelope pattern)', () => {
     const spec = {
       asyncapi: '2.6.0',
       info: { title: 'Multi' },
@@ -149,8 +149,21 @@ describe('buildEventsIR (AsyncAPI 2.x)', () => {
           publish: {
             message: {
               oneOf: [
-                { name: 'UserSignedUp', payload: { type: 'object', properties: { userId: { type: 'string' } } } },
-                { name: 'UserDeleted', payload: { type: 'object', properties: { userId: { type: 'string' } } } },
+                {
+                  name: 'UserSignedUp',
+                  payload: {
+                    type: 'object',
+                    properties: { userId: { type: 'string' }, email: { type: 'string' } },
+                    required: ['userId'],
+                  },
+                },
+                {
+                  name: 'UserDeleted',
+                  payload: {
+                    type: 'object',
+                    properties: { userId: { type: 'string' }, reason: { type: 'string' } },
+                  },
+                },
               ],
             },
           },
@@ -158,9 +171,56 @@ describe('buildEventsIR (AsyncAPI 2.x)', () => {
       },
     } as unknown as OpenApiSpec;
     const ir = buildEventsIR(spec);
-    const names = ir.groups[0]!.channels.map((c) => c.name).sort();
-    expect(names).toEqual(['onUserDeleted', 'onUserSignedUp']);
-    expect(new Set(ir.groups[0]!.channels.map((c) => c.topic))).toEqual(new Set(['events']));
+    expect(ir.groups[0]!.channels).toHaveLength(1);
+    const channel = ir.groups[0]!.channels[0]!;
+    expect(channel.name).toBe('onEvents');
+    expect(channel.topic).toBe('events');
+    expect(channel.messages).toHaveLength(2);
+    expect(channel.messages!.map((m) => m.name)).toEqual(['UserSignedUp', 'UserDeleted']);
+    expect(channel.messages![0]!.fields.map((f) => f.wireName)).toEqual(['userId', 'email']);
+    expect(channel.messages![0]!.fields[0]!.required).toBe(true);
+
+    // The emitter renders per-variant interfaces, a union and a typed subscribe.
+    const files = emitEvents(ir);
+    const body = files.find((f) => f.path.endsWith('multi-events.ts'))!.content;
+    expect(body).toContain('export interface MultiEventsUserSignedUp');
+    expect(body).toContain('export interface MultiEventsUserDeleted');
+    expect(body).toContain('export type MultiEventsOnEventsMessage = MultiEventsUserSignedUp | MultiEventsUserDeleted;');
+    expect(body).toContain('onEvents: subscribe<MultiEventsOnEventsMessage>("events"),');
+  });
+
+  it('applies naming rules (eventNameStyle, handlerPrefix, stripVersion) and emits EVENT_NAMES', () => {
+    const spec = {
+      asyncapi: '2.6.0',
+      info: { title: 'Shop' },
+      servers: { prod: { url: 'wss://x.test', protocol: 'wss' } },
+      channels: {
+        'order.v1.created': {
+          'x-client-domain': 'orders',
+          'x-client-event-name': 'orderCreated',
+          publish: {
+            message: {
+              name: 'OrderCreated',
+              payload: { type: 'object', properties: { orderId: { type: 'string' } } },
+            },
+          },
+        },
+      },
+    } as unknown as OpenApiSpec;
+
+    const ir = buildEventsIR(spec, {
+      naming: { eventNameStyle: 'dot.case', handlerPrefix: 'when', stripVersion: true },
+    });
+    expect(ir.groups).toHaveLength(1);
+    expect(ir.groups[0]!.name).toBe('orders'); // x-client-domain grouping
+    const channel = ir.groups[0]!.channels[0]!;
+    expect(channel.name).toBe('whenOrderCreated'); // x-client-event-name + handlerPrefix
+    expect(channel.eventAlias).toBe('order.created'); // stripVersion + dot.case
+
+    const files = emitEvents(ir);
+    const index = files.find((f) => f.path === 'index.ts')!.content;
+    expect(index).toContain('export const EVENT_NAMES = {');
+    expect(index).toContain('"order.created": "order.v1.created"');
   });
 
   it('rejects unsupported versions and non-AsyncAPI documents', () => {

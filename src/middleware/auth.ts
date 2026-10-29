@@ -9,20 +9,41 @@
 import type { AxiosInstance } from 'axios';
 import { AuthError } from '../errors.js';
 
+/**
+ * Request information the pipeline attaches to the auth surface, so an
+ * {@link AuthProvider} (or a custom resolver) can make transport- and
+ * operation-aware decisions.
+ */
+export interface AuthRequestInfo {
+  transport: 'http';
+  method: string;
+  path: string;
+  url: string;
+  /** Contract / operation name. */
+  operationId: string;
+  /** 0-based attempt counter. */
+  attempt: number;
+  /** Scopes declared by the contract's `security` option. */
+  scopes?: string[];
+}
+
 /** Mutable auth surface over an outgoing request. */
-export interface AuthContext {
+export interface AuthSurface {
   headers: Record<string, string>;
   query: URLSearchParams;
+  /** Request context, populated by the pipeline. */
+  request?: AuthRequestInfo;
 }
 
 /**
  * An auth resolver. The optional `provider` field is set by
  * {@link auth.tokenProvider} so the pipeline can trigger token
  * invalidation + retry when the server answers 401; `lastToken` exposes
- * the most recently applied token for that purpose.
+ * the most recently applied token for that purpose. Providers may also
+ * implement `onUnauthorized` to run an async refresh and veto the retry.
  */
 export type AuthResolver = {
-  (ctx: AuthContext): void | Promise<void>;
+  (ctx: AuthSurface): void | Promise<void>;
   readonly provider?: TokenProvider;
   lastToken?: () => string | undefined;
 };
@@ -32,12 +53,26 @@ export interface TokenProvider {
   getToken(): string | Promise<string>;
   /** Called when a request authenticated with `token` received a 401. */
   invalidate?(token?: string): void;
+  /**
+   * Async 401 hook: refresh credentials and decide whether the request
+   * should be retried (once). Takes precedence over `invalidate` when both
+   * are present — this is the bridge `AuthProvider.handleUnauthorized`
+   * plugs into.
+   */
+  onUnauthorized?(info: {
+    url: string;
+    method?: string;
+    path?: string;
+    operationId?: string;
+    attempt?: number;
+    scopes?: string[];
+  }): Promise<boolean>;
   /** How the token is applied. Defaults to an `Authorization: Bearer` header. */
-  apply?(ctx: AuthContext, token: string): void;
+  apply?(ctx: AuthSurface, token: string): void;
 }
 
 function makeResolver(
-  fn: (ctx: AuthContext) => void | Promise<void>,
+  fn: (ctx: AuthSurface) => void | Promise<void>,
   provider?: TokenProvider,
 ): AuthResolver {
   const resolver = fn as AuthResolver;
@@ -104,12 +139,44 @@ export const auth = {
   },
 
   /**
+   * CSRF protection for cookie-authenticated sessions: a header carrying a
+   * CSRF token is stamped onto state-changing requests (`POST`, `PUT`,
+   * `PATCH`, `DELETE` — override with `methods`). Pair with
+   * `credentials: 'include'` on the underlying axios instance.
+   *
+   * ```ts
+   * auth.csrf({
+   *   headerName: 'X-CSRF-Token',
+   *   tokenProvider: async () => (await cookies.get('csrf')).value,
+   * })
+   * ```
+   */
+  csrf(options: {
+    headerName?: string;
+    tokenProvider: () => string | Promise<string>;
+    methods?: readonly string[];
+  }): AuthResolver {
+    const headerName = options.headerName ?? 'X-CSRF-Token';
+    const methods = new Set(
+      (options.methods ?? ['POST', 'PUT', 'PATCH', 'DELETE']).map((m) => m.toUpperCase()),
+    );
+    return makeResolver(async (ctx) => {
+      const method = (ctx.request?.method ?? '').toUpperCase();
+      if (method && !methods.has(method)) return;
+      const token = await resolveValue(options.tokenProvider());
+      if (token) {
+        ctx.headers[headerName] = token;
+      }
+    });
+  },
+
+  /**
    * OAuth-style token provider. The provider owns caching and refresh;
    * on a 401 the pipeline calls `invalidate(token)` and retries once.
    */
   tokenProvider(provider: TokenProvider): AuthResolver {
     let lastToken: string | undefined;
-    const resolver = (async (ctx: AuthContext) => {
+    const resolver = (async (ctx: AuthSurface) => {
       const token = await provider.getToken();
       if (!token) {
         throw new AuthError('token provider returned an empty token');

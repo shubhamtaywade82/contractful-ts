@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AuthorizationError,
   HttpStatusError,
   RateLimitError,
   ResponseShapeError,
@@ -64,12 +65,14 @@ describe('validateResponse — declared statuses', () => {
     }
   });
 
-  it('throws for statuses that were never declared', () => {
+  it('throws for statuses that were never declared (403 → AuthorizationError)', () => {
     try {
       validateResponse(decls, { status: 403, headers: {}, body: null });
       expect.unreachable();
     } catch (err) {
-      expect((err as HttpStatusError).message).toContain('not declared');
+      expect(err).toBeInstanceOf(AuthorizationError);
+      expect((err as AuthorizationError).declared).toBe(false);
+      expect((err as AuthorizationError).status).toBe(403);
     }
   });
 

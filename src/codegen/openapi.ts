@@ -212,6 +212,24 @@ export interface OperationIR {
   tags: string[];
   params: ParamIR[];
   responds: ResponseIR[];
+  /** Security requirement names / OAuth scopes, forwarded to the auth provider. */
+  security?: string[];
+}
+
+/** A security scheme from `components.securitySchemes` (3.x) / `securityDefinitions` (2.0). */
+export interface SecuritySchemeIR {
+  name: string;
+  type: 'apiKey' | 'http' | 'oauth2' | 'openIdConnect';
+  /** apiKey location: `header` | `query` | `cookie`. */
+  in?: 'header' | 'query' | 'cookie';
+  /** apiKey parameter name. */
+  paramName?: string;
+  /** http scheme, e.g. `basic` | `bearer`. */
+  scheme?: string;
+  bearerFormat?: string;
+  /** OAuth2 flows: name → { tokenUrl?, authorizationUrl?, refreshUrl?, scopes }. */
+  flows?: Record<string, { tokenUrl?: string; authorizationUrl?: string; refreshUrl?: string; scopes: Record<string, string> }>;
+  description?: string;
 }
 
 export interface ApiGroupIR {
@@ -231,6 +249,8 @@ export interface ApiIR {
   groups: ApiGroupIR[];
   /** Free-form notes surfaced in generated file headers (e.g. auth hints). */
   notes?: string[];
+  /** Declared security schemes, emitted as a typed auth surface. */
+  securitySchemes?: SecuritySchemeIR[];
 }
 
 export interface BuildIROptions {
@@ -263,6 +283,9 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
 
   const paths = dereference(spec.paths ?? {}, spec) as JsonRecord;
   const groupBy = options.groupBy ?? 'tag';
+  const securitySchemes = securitySchemesFrom(spec, isV2);
+  const knownSchemes = new Set((securitySchemes ?? []).map((s) => s.name));
+  const globalSecurity = (spec as JsonRecord).security;
   const groups = new Map<string, ApiGroupIR>();
 
   for (const [rawPath, rawItem] of Object.entries(paths)) {
@@ -273,10 +296,10 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
       const rawOp = pathItem[verb];
       if (typeof rawOp !== 'object' || rawOp === null) continue;
       const op = rawOp as JsonRecord;
-      const operation = buildOperation(verb.toUpperCase(), rawPath, pathItem, op, isV2);
+      const operation = buildOperation(verb.toUpperCase(), rawPath, pathItem, op, isV2, globalSecurity, knownSchemes);
       if (!operation) continue;
 
-      const groupName = pickGroup(operation, pathItem, groupBy);
+      const groupName = pickGroup(operation, pathItem, op, groupBy);
       const group = ensureGroup(groups, groupName);
       const used = new Set(group.operations.map((o) => o.name));
       operation.name = uniqueName(operation.name, used);
@@ -289,10 +312,83 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
     version,
     base,
     groups: [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    securitySchemes,
   };
 }
 
-function pickGroup(op: OperationIR, pathItem: JsonRecord, groupBy: 'tag' | 'path'): string {
+/** Parses `components.securitySchemes` (3.x) / `securityDefinitions` (2.0). */
+function securitySchemesFrom(spec: OpenApiSpec, isV2: boolean): SecuritySchemeIR[] | undefined {
+  const raw = isV2
+    ? (spec as JsonRecord).securityDefinitions
+    : ((spec.components as JsonRecord | undefined)?.securitySchemes ?? undefined);
+  if (!raw || typeof raw !== 'object' || raw === null) return undefined;
+  const schemes: SecuritySchemeIR[] = [];
+  for (const [name, value] of Object.entries(raw as JsonRecord)) {
+    if (typeof value !== 'object' || value === null) continue;
+    const s = value as JsonRecord;
+    const rawType = String(s.type ?? '');
+    if (rawType !== 'apiKey' && rawType !== 'http' && rawType !== 'oauth2' && rawType !== 'openIdConnect') {
+      continue;
+    }
+    const scheme: SecuritySchemeIR = { name, type: rawType };
+    if (s.in === 'header' || s.in === 'query' || s.in === 'cookie') scheme.in = s.in;
+    if (typeof s.name === 'string') scheme.paramName = s.name;
+    if (typeof s.scheme === 'string') scheme.scheme = s.scheme;
+    if (typeof s.bearerFormat === 'string') scheme.bearerFormat = s.bearerFormat;
+    if (typeof s.description === 'string') scheme.description = s.description;
+    if (s.flows && typeof s.flows === 'object' && s.flows !== null) {
+      scheme.flows = {};
+      for (const [flowName, rawFlow] of Object.entries(s.flows as JsonRecord)) {
+        if (typeof rawFlow !== 'object' || rawFlow === null) continue;
+        const flow = rawFlow as JsonRecord;
+        const scopes: Record<string, string> = {};
+        if (flow.scopes && typeof flow.scopes === 'object' && flow.scopes !== null) {
+          for (const [scope, doc] of Object.entries(flow.scopes as JsonRecord)) {
+            scopes[scope] = typeof doc === 'string' ? doc : '';
+          }
+        }
+        scheme.flows[flowName] = {
+          tokenUrl: typeof flow.tokenUrl === 'string' ? flow.tokenUrl : undefined,
+          authorizationUrl: typeof flow.authorizationUrl === 'string' ? flow.authorizationUrl : undefined,
+          refreshUrl: typeof flow.refreshUrl === 'string' ? flow.refreshUrl : undefined,
+          scopes,
+        };
+      }
+    }
+    schemes.push(scheme);
+  }
+  return schemes.length > 0 ? schemes : undefined;
+}
+
+/** Flattens an operation's `security` requirements into scheme/scope names. */
+function securityFromOperation(
+  op: JsonRecord,
+  globalSecurity: unknown,
+  knownSchemes: Set<string>,
+): string[] | undefined {
+  const raw = Array.isArray(op.security) ? op.security : (Array.isArray(globalSecurity) ? globalSecurity : []);
+  const out: string[] = [];
+  for (const requirement of raw) {
+    if (typeof requirement !== 'object' || requirement === null) continue;
+    for (const [schemeName, scopes] of Object.entries(requirement as JsonRecord)) {
+      if (knownSchemes.size > 0 && !knownSchemes.has(schemeName)) continue;
+      out.push(schemeName);
+      if (Array.isArray(scopes)) {
+        for (const scope of scopes) {
+          if (typeof scope === 'string' && !out.includes(scope)) out.push(scope);
+        }
+      }
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function pickGroup(op: OperationIR, pathItem: JsonRecord, opRecord: JsonRecord, groupBy: 'tag' | 'path'): string {
+  // Explicit domain extension wins (spec → domain facade grouping).
+  const domain =
+    (typeof opRecord['x-client-domain'] === 'string' && opRecord['x-client-domain']) ||
+    (typeof pathItem['x-client-domain'] === 'string' && pathItem['x-client-domain']);
+  if (domain) return sanitizeGroup(domain);
   if (groupBy === 'path') {
     const first = op.path.split('/').find((seg) => seg.length > 0 && !seg.startsWith(':'));
     return sanitizeGroup(first ?? 'root');
@@ -309,6 +405,8 @@ function buildOperation(
   pathItem: JsonRecord,
   op: JsonRecord,
   isV2: boolean,
+  globalSecurity: unknown,
+  knownSchemes: Set<string>,
 ): OperationIR | null {
   // Route: {param} → :param
   const path = rawPath.replace(/\{([^}]+)\}/g, (_m, name: string) => `:${name}`);
@@ -444,8 +542,9 @@ function buildOperation(
   const tags = Array.isArray(op.tags)
     ? op.tags.filter((t): t is string => typeof t === 'string')
     : [];
+  const security = securityFromOperation(op, globalSecurity, knownSchemes);
 
-  return { name, method, path, description, summary, tags, params, responds };
+  return { name, method, path, description, summary, tags, params, responds, security };
 }
 
 function firstEntry(record: JsonRecord): JsonRecord | undefined {

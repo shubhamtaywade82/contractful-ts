@@ -146,6 +146,78 @@ auth: auth.tokenProvider(createClientCredentialsProvider({
 
 Per-call escape hatch: `github.listUsers({ _skipAuth: true })`.
 
+### The injectable `AuthProvider`
+
+For platform-style clients that mix HTTP and WebSocket transports, auth is delegated to a single transport-aware provider. Nothing is ever embedded in generated code — the spec describes *what* is required, the provider decides *how*:
+
+```ts
+import {
+  createTokenManager, authProviderFromTokenManager, authProviderResolver,
+  type AuthProvider,
+} from 'contractful-ts';
+
+// Single-flight refresh: a burst of requests after expiry = one token call.
+const tokens = createTokenManager({
+  async fetchToken(scopes) {
+    const res = await fetch('https://auth.example.test/oauth/token', {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: process.env.CLIENT_ID!,
+        scope: scopes.join(' '),
+      }),
+    });
+    const body = await res.json();
+    return { accessToken: body.access_token, expiresAt: Date.now() + body.expires_in * 1000 };
+  },
+});
+
+// Bearer for HTTP, browser-safe query token for WebSocket, refresh on 401/4001.
+const authProvider: AuthProvider = authProviderFromTokenManager(tokens);
+
+// HTTP side — a resolver the defineApi pipeline understands:
+const api = new ShopApi({ auth: authProviderResolver(authProvider) });
+// (generated platform.ts clients wire this for you)
+
+// WebSocket side — pass the provider itself:
+const events = new ShopEvents({ authProvider });
+```
+
+The contract:
+
+```ts
+interface AuthProvider {
+  getAuth(context: AuthContext): Promise<AuthMaterial>;
+  handleUnauthorized?(context: AuthContext): Promise<boolean>;
+  onAuthStateChanged?(listener: () => void): () => void;
+}
+```
+
+- `AuthContext` carries `transport` (`http` / `websocket` / `sse` / `graphql`), `url`, `method`, `path`, `channel`, `operationId`, `scopes` and `attempt` — so the same provider can stamp an `Authorization` header for REST and a one-time ticket for the socket.
+- `AuthMaterial` is whatever the server accepts: `headers`, `query`, `cookie`, `protocols` (WebSocket subprotocols) or `connectMessage` (an auth frame sent right after connect).
+- `wsTicketAuthProvider(fetchTicket)` implements the recommended browser pattern: fetch a short-lived one-time ticket over REST, connect with `?ticket=...`.
+
+**Deterministic refresh semantics.** A `401` triggers `handleUnauthorized` at most *once* per request; the request is retried only when the hook resolves `true`, and the final failure is an `AuthenticationError` (kind: `authentication`). A `403` is *never* auto-refreshed — it surfaces as `AuthorizationError` (kind: `authorization`) because fresh tokens of the same principal cannot fix a permission. `errorKind(err)` maps every library error onto that shared taxonomy (`authentication | authorization | validation | network | timeout | server | websocket | unknown`).
+
+**Cookie sessions + CSRF.** Use `credentials: 'include'` on the underlying axios instance and stamp the anti-CSRF header on state-changing requests:
+
+```ts
+auth: auth.csrf({
+  headerName: 'X-CSRF-Token',
+  tokenProvider: async () => getCsrfToken(),
+})
+```
+
+**Token storage** stays your choice — the token manager is deliberately memory-only:
+
+| Environment | Recommendation |
+|---|---|
+| Browser SPA | In-memory token + secure backend session |
+| Browser SPA with refresh tokens | Backend-for-frontend or httpOnly cookie |
+| Browser SPA using OAuth | Authorization Code + PKCE |
+| Node service | Environment variables / secret manager |
+| Mobile / desktop | OS secure storage (Keychain, Keystore, ...) |
+
 ## Retries, circuit breaker, rate limiting
 
 ```ts
@@ -266,12 +338,44 @@ The runtime underneath is production-shaped, not a thin wrapper:
 - **Heartbeats** with a liveness timeout that force-closes dead connections.
 - **Topic routing** — exact topics, `:param` patterns (`order/:id/created`), single-segment `*` and the global `*` wildcard.
 - **Envelopes are configurable** — the default is JSON `{ topic, payload }`; swap `publishEnvelope` / `topicExtractor` / `payloadExtractor` for Socket.IO-style `{ event, data }` or anything else, and inject a `socketFactory` to adapt any transport.
-- **Three browser-safe auth modes** — `query` (token in the URL, refreshed per attempt), `subprotocol`, and `first-message` — because browsers cannot set headers on the WebSocket upgrade.
-- The low-level `EventsClient` and `ReconnectingSocket` are exported for direct use; `ws` is loaded lazily as an optional peer in Node.
+- **Every auth mode that matters** — `query`, `subprotocol`, `connect-message`, `ticket` (one-time ticket via `tokenProvider`) and `header` (Node `ws` / custom factories only), plus a full `authProvider` integration where `getAuth({ transport: 'websocket', ... })` decides the material per (re)connection. Browsers cannot set headers on the WebSocket upgrade — the browser-safe modes are the defaults.
+- **Close-code policy** — private-use codes are convention: `4001` (token expired) triggers `authProvider.handleUnauthorized` and reconnects only on a successful refresh; `4003` / `4004` surface as a terminal `WebSocketApiError` without retrying. `onAuthStateChanged` proactively reconnects with fresh credentials before the server notices an expiry.
+- **Server-side subscriptions** — set `subscribeEnvelope` / `unsubscribeEnvelope` and every registered pattern is (re)sent after each reconnect from the refcounted registry.
+- **Event ids** — envelopes carrying `.id` / `.eventId` are tracked in `getLastEventId()` and handed to handlers via `ctx.eventId`, so you can catch up over REST after a disconnect (`GET /events?since=<lastId>`). Don't assume exactly-once delivery; make consumers idempotent.
+- The low-level `EventsClient` and `ReconnectingSocket` are exported for direct use; `ws` is loaded lazily as an optional peer in Node. Socket.IO users inject `socketFactory: () => io(url)` and map envelopes through `topicExtractor` / `publishEnvelope`.
 
 Invalid incoming messages surface as `MessageShapeError` through `onError` (or your own `onInvalidMessage` hook) without dropping the connection.
 
 GraphQL subscriptions work too — `createGraphQLWsClient` speaks the `graphql-transport-ws` protocol (connection_init/ack, id-correlated next/error/complete, ping/pong, resubscribe after reconnect) on the same socket machinery.
+
+## The unified platform facade
+
+REST and WebSocket have different lifecycles — stateless request/response vs. stateful connection — so the transports stay separate internally and are merged only at the API surface. `createPlatformClient` gives your app one typed handle with shared auth and a single `dispose()`:
+
+```ts
+import { createPlatformClient, createEventsCacheInvalidator } from 'contractful-ts';
+
+const platform = createPlatformClient({
+  authProvider,                                     // shared, transport-aware
+  rest: ({ auth }) => new ShopApi({ auth }),        // HTTP: bridged resolver (401 → single refresh + retry)
+  events: ({ authProvider }) => new ShopEvents({ authProvider }),
+  identity: { clientName: 'shop-web', clientVersion: '1.2.3' }, // X-Client-Name / X-Client-Version
+});
+
+await platform.events.connect();                    // lifecycle stays explicit
+const product = await platform.rest.getProduct({ id: 'p1' });
+const off = platform.events.onOrderCreated((msg) => invalidateCache(msg));
+
+await platform.dispose();                           // disconnects events; REST is stateless
+```
+
+Commands go through REST, events arrive through the socket. For UI work, `createEventsCacheInvalidator` wires events to cache invalidation without baking any cache into the transports:
+
+```ts
+const stop = createEventsCacheInvalidator(platform.events.raw, [
+  { event: 'order.created', invalidate: () => queryClient.invalidateQueries({ queryKey: ['orders'] }) },
+]);
+```
 
 ## Generating clients from any spec (`contractful-gen`)
 
@@ -317,6 +421,39 @@ contractful-gen: generated 12 file(s) across 4 namespace(s) → src/generated/cl
 ```
 
 Each namespace gets its own directory with an index; a root `index.ts` re-exports everything. A complete runnable example lives in [`examples/multi-format/`](examples/multi-format/) — four formats, one command, strict-tsc-clean output.
+
+### What multi-source runs emit
+
+When a config mixes HTTP and event sources, the generator additionally emits:
+
+- **`platform.ts`** — a `createPlatformClient(options)` facade unifying every HTTP group (`platform.rest.orders.*`, `platform.rest.products.*`, ...) and every events group (`platform.events.*`) behind one call, with the shared `authProvider` bridged into the HTTP pipeline, `X-Client-Name` / `X-Client-Version` identity headers and a single `dispose()`. Disable with `"platform": false` or `--no-platform`.
+- **`CLIENT_METADATA`** — deterministic provenance in every index: generator version plus a `sha256:` hash of each source document, so you can verify which spec revision a bundle was built from.
+- **A typed auth surface** — specs with `securitySchemes` produce `auth.ts` (`SecuritySchemeName`, a discriminated `AuthOptions` union, `SecurityScope`) and per-operation `security: ["OAuth2", "orders:read"]` metadata that flows into `AuthContext.scopes` at runtime. Secrets are never generated — only their shape.
+
+Domain grouping works across formats: tag an operation with `x-client-domain: admin` (OpenAPI/Postman) or a channel with `x-client-domain: orders` / `x-client-event-name: orderCreated` (AsyncAPI) and it lands in its own generated client group — `platform.rest.admin`, `platform.events.orders` — instead of the default bucket.
+
+Deterministic event naming is configurable:
+
+```jsonc
+{
+  "naming": { "eventNameStyle": "dot.case", "handlerPrefix": "on", "stripVersion": true }
+}
+```
+
+`order.v1.created` becomes the method `onOrderCreated`, and a per-namespace `EVENT_NAMES` map (`"order.created": "order.v1.created"`) keys string-based subscriptions for the low-level `raw.subscribe()` escape hatch.
+
+**Multi-message channels become typed unions.** An AsyncAPI channel whose operation carries `message.oneOf: [ProductCreated, ProductPriceChanged]` no longer fans into per-message methods that false-positive each other's shape gate — it emits one method with a generated union:
+
+```ts
+export interface ShopEventsProductCreated { productId: string; title?: string; }
+export interface ShopEventsProductPriceChanged { productId: string; price: number; }
+export type ShopEventsOnProductEventsMessage = ShopEventsProductCreated | ShopEventsProductPriceChanged;
+
+// in the channel map:
+onProductEvents: subscribe<ShopEventsOnProductEventsMessage>("product.events"),
+```
+
+For envelope-style servers (one discriminator field fanning many event types), bind the exported `EventEnvelope<Type, Payload>` helper to your payload types and narrow with a `switch`.
 
 Generated file (excerpt — real output for the Swagger petstore):
 

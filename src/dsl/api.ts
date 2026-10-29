@@ -436,7 +436,19 @@ export function defineApi<C extends ApiContracts>(
         try {
           await this.#beforeRequest?.(ctx);
           if (!prepared.meta._skipAuth && this.#auth) {
-            await this.#auth({ headers: ctx.headers, query: ctx.query });
+            await this.#auth({
+              headers: ctx.headers,
+              query: ctx.query,
+              request: {
+                transport: 'http',
+                method: ctx.method,
+                path: ctx.path,
+                url: ctx.url,
+                operationId: ctx.contract,
+                attempt,
+                scopes: def.options.security ? [...def.options.security] : undefined,
+              },
+            });
           }
 
           const attemptStartedAt = Date.now();
@@ -453,7 +465,10 @@ export function defineApi<C extends ApiContracts>(
           // The host answered — breaker sees a success regardless of status.
           this.#breakers?.recordSuccess(host);
 
-          // OAuth-style refresh: on a single 401, invalidate and retry once.
+          // Refresh-and-retry: on a single 401, ask the provider whether a
+          // retry is warranted (AuthProvider.handleUnauthorized bridges
+          // here) and retry at most once. Legacy providers without the
+          // async hook fall back to invalidate() + unconditional retry.
           const provider = this.#auth?.provider;
           if (
             res.status === 401 &&
@@ -462,8 +477,20 @@ export function defineApi<C extends ApiContracts>(
             !prepared.meta._skipAuth
           ) {
             authRefreshed = true;
-            provider.invalidate?.(this.#auth?.lastToken?.());
-            continue;
+            if (provider.onUnauthorized) {
+              const shouldRetry = await provider.onUnauthorized({
+                url: ctx.url,
+                method: ctx.method,
+                path: ctx.path,
+                operationId: ctx.contract,
+                attempt,
+                scopes: def.options.security ? [...def.options.security] : undefined,
+              });
+              if (shouldRetry) continue;
+            } else {
+              provider.invalidate?.(this.#auth?.lastToken?.());
+              continue;
+            }
           }
 
           const outcome = validateResponse(def.options.responds, res);

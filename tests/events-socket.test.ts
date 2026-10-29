@@ -107,7 +107,7 @@ describe('ReconnectingSocket', () => {
     await expect(socket.open()).rejects.toBeInstanceOf(EventsConnectionError);
     expect(socket.state).toBe('failed');
     // The connect timeout closed the socket.
-    expect(FakeSocket.first().closed?.code).toBe(4001);
+    expect(FakeSocket.first().closed?.code).toBe(4002);
   });
 
   it('times out a socket that never opens and retries', async () => {
@@ -130,7 +130,7 @@ describe('ReconnectingSocket', () => {
 
     await socket.open();
     expect(opened).toBe(true);
-    expect(FakeSocket.all()[0]!.closed?.code).toBe(4001);
+    expect(FakeSocket.all()[0]!.closed?.code).toBe(4002);
     await socket.close();
   });
 

@@ -20,11 +20,30 @@ import type { ChannelGroupIR, ChannelIR, EventsIR } from './model.js';
 
 export type AsyncApiPerspective = 'server' | 'client';
 
+/** Deterministic naming rules for derived client surface names. */
+export interface EventNamingOptions {
+  /**
+   * Normalizes channel labels before method names are derived, and keys the
+   * generated `EVENT_NAMES` alias map. Default `'keep'`.
+   *
+   * - `'dot.case'` — `OrderCreated` / `order-created` → `order.created`
+   * - `'kebab-case'` — → `order-created`
+   * - `'keep'` — the raw channel label
+   */
+  eventNameStyle?: 'dot.case' | 'kebab-case' | 'keep';
+  /** Prefix for subscribe-channel methods. Default `'on'`. */
+  handlerPrefix?: string;
+  /** Drop `v<digits>` version segments from derived names. Default `false`. */
+  stripVersion?: boolean;
+}
+
 export interface BuildEventsIROptions {
   /** Whose perspective the document is written from. Default `'server'`. */
   perspective?: AsyncApiPerspective;
   /** Overrides the server URL from the spec. */
   url?: string;
+  /** Deterministic naming rules (see {@link EventNamingOptions}). */
+  naming?: EventNamingOptions;
 }
 
 export class AsyncApiError extends Error {
@@ -52,20 +71,33 @@ export function buildEventsIR(spec: OpenApiSpec, options: BuildEventsIROptions =
   const version = spec.info?.version;
   const url = options.url ?? pickServerUrl(spec, major);
   const perspective = options.perspective ?? 'server';
+  const naming: EventNamingOptions = options.naming ?? {};
 
   const dereferenced = dereference(spec as unknown as Json, spec) as JsonRecord;
   const channels = (dereferenced.channels ?? {}) as JsonRecord;
 
-  const group: ChannelGroupIR = {
-    name: 'events',
-    constName: `${toCamelCase(title)}Events`,
-    fileName: `${toKebabCase(title)}-events.ts`,
-    channels: [],
+  // Channels group by `x-client-domain` (the domain facade hook), falling
+  // back to a single `events` group.
+  const groups = new Map<string, ChannelGroupIR>();
+  const ensureGroup = (domain: string): ChannelGroupIR => {
+    const key = domain || 'events';
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        name: key,
+        constName: `${toCamelCase(title)}${toPascalCase(key)}`,
+        fileName: `${toKebabCase(title)}-${toKebabCase(key)}.ts`,
+        channels: [],
+      };
+      groups.set(key, group);
+    }
+    return group;
   };
   const usedNames = new Set<string>();
+  const defaultGroup = ensureGroup('events');
 
   if (major === 2) {
-    buildV2Channels(channels, group, usedNames, perspective);
+    buildV2Channels(channels, defaultGroup, groups, ensureGroup, usedNames, perspective, naming);
   } else {
     // 3.x: raw operations keep $ref pointers whose trailing segment names the
     // message — that name is lost after dereferencing, so read refs raw and
@@ -73,18 +105,25 @@ export function buildEventsIR(spec: OpenApiSpec, options: BuildEventsIROptions =
     buildV3Channels(
       channels,
       (spec.operations ?? {}) as JsonRecord,
-      group,
+      defaultGroup,
+      groups,
+      ensureGroup,
       usedNames,
       perspective,
+      naming,
       spec,
     );
   }
+
+  const sorted = [...groups.values()]
+    .filter((g) => g.channels.length > 0)
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   return {
     title,
     version,
     url,
-    groups: group.channels.length > 0 ? [group] : [],
+    groups: sorted,
   };
 }
 
@@ -130,14 +169,48 @@ function hostToUrl(server: JsonRecord): string {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Naming                                                                      */
+/* -------------------------------------------------------------------------- */
+
+/** Applies the configured naming rules to a channel label. */
+export function normalizeEventName(label: string, naming: EventNamingOptions): string {
+  let name = label;
+  if (naming.stripVersion) {
+    name = name
+      .split(/[.\-/]/)
+      .filter((segment) => !/^v\d+$/i.test(segment))
+      .join('.');
+  }
+  if (naming.eventNameStyle === 'dot.case') {
+    name = name
+      .replace(/([a-z0-9])([A-Z])/g, '$1.$2')
+      .toLowerCase()
+      .replace(/[.\-/]+/g, '.')
+      .replace(/^\.+|\.+$/g, '');
+  } else if (naming.eventNameStyle === 'kebab-case') {
+    name = name
+      .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+      .toLowerCase()
+      .replace(/[.\-/]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+  return name || label;
+}
+
+/* -------------------------------------------------------------------------- */
 /* 2.x                                                                        */
 /* -------------------------------------------------------------------------- */
 
+type EnsureGroup = (domain: string) => ChannelGroupIR;
+
 function buildV2Channels(
   channels: JsonRecord,
-  group: ChannelGroupIR,
+  defaultGroup: ChannelGroupIR,
+  groups: Map<string, ChannelGroupIR>,
+  ensureGroup: EnsureGroup,
   usedNames: Set<string>,
   perspective: AsyncApiPerspective,
+  naming: EventNamingOptions,
 ): void {
   for (const [rawName, rawChannel] of Object.entries(channels)) {
     if (typeof rawChannel !== 'object' || rawChannel === null) continue;
@@ -146,6 +219,9 @@ function buildV2Channels(
     const params = paramsFromV2Parameters(channel.parameters as JsonRecord | undefined);
     const description =
       typeof channel.description === 'string' ? channel.description : undefined;
+    const domain =
+      typeof channel['x-client-domain'] === 'string' ? channel['x-client-domain'] : '';
+    const group = domain ? ensureGroup(domain) : defaultGroup;
 
     // 2.x: from the document perspective, `publish` = this side publishes.
     for (const [key, direction] of [
@@ -161,9 +237,14 @@ function buildV2Channels(
         params,
         description,
         channelLabel: rawName,
+        eventNameOverride:
+          typeof channel['x-client-event-name'] === 'string'
+            ? (channel['x-client-event-name'] as string)
+            : undefined,
         messages,
         group,
         usedNames,
+        naming,
       });
     }
   }
@@ -204,9 +285,12 @@ function paramsFromV2Parameters(parameters: JsonRecord | undefined): ParamIR[] {
 function buildV3Channels(
   channels: JsonRecord,
   operations: JsonRecord,
-  group: ChannelGroupIR,
+  defaultGroup: ChannelGroupIR,
+  groups: Map<string, ChannelGroupIR>,
+  ensureGroup: EnsureGroup,
   usedNames: Set<string>,
   perspective: AsyncApiPerspective,
+  naming: EventNamingOptions,
   spec: OpenApiSpec,
 ): void {
   const channelEntries = Object.entries(channels).filter(
@@ -234,6 +318,9 @@ function buildV3Channels(
     seenChannels.add(resolvedChannelName);
     if (!channel) continue;
 
+    const domain =
+      typeof channel['x-client-domain'] === 'string' ? (channel['x-client-domain'] as string) : '';
+    const group = domain ? ensureGroup(domain) : defaultGroup;
     const address =
       typeof channel.address === 'string' && channel.address.length > 0 ? channel.address : resolvedChannelName;
     const topic = address.replace(/\{([^}]+)\}/g, (_m, param: string) => `:${param}`);
@@ -275,9 +362,14 @@ function buildV3Channels(
       description:
         typeof operation.description === 'string' ? operation.description : undefined,
       channelLabel: resolvedChannelName,
+      eventNameOverride:
+        typeof channel['x-client-event-name'] === 'string'
+          ? (channel['x-client-event-name'] as string)
+          : undefined,
       messages,
       group,
       usedNames,
+      naming,
       methodName: opName,
     });
   }
@@ -297,15 +389,22 @@ function buildV3Channels(
       messages.push({ __name: messageName, ...(rawMessage as object) } as MessageSource);
     }
     if (messages.length === 0) continue;
+    const domain =
+      typeof channel['x-client-domain'] === 'string' ? (channel['x-client-domain'] as string) : '';
     emitChannelMethods({
       topic,
       direction: 'in',
       params: paramsFromV2Parameters(channel.parameters as JsonRecord | undefined),
       description: typeof channel.description === 'string' ? channel.description : undefined,
       channelLabel: channelName,
+      eventNameOverride:
+        typeof channel['x-client-event-name'] === 'string'
+          ? (channel['x-client-event-name'] as string)
+          : undefined,
       messages,
-      group,
+      group: domain ? ensureGroup(domain) : defaultGroup,
       usedNames,
+      naming,
     });
   }
 }
@@ -325,32 +424,54 @@ function emitChannelMethods(input: {
   params: ParamIR[];
   description?: string;
   channelLabel: string;
+  eventNameOverride?: string;
   messages: MessageSource[];
   group: ChannelGroupIR;
   usedNames: Set<string>;
+  naming: EventNamingOptions;
   /** 3.x operation key — the operationId equivalent, preferred as method name. */
   methodName?: string;
 }): void {
-  const { topic, direction, params, description, channelLabel, messages, group, usedNames, methodName } = input;
-  const prefix = direction === 'in' ? 'on' : 'publish';
+  const { topic, direction, params, description, channelLabel, eventNameOverride, messages, group, usedNames, methodName, naming } =
+    input;
+  const prefix = direction === 'in' ? (naming.handlerPrefix ?? 'on') : 'publish';
+  const eventAlias = normalizeEventName(eventNameOverride ?? channelLabel, naming);
+  const nameBase = eventNameOverride ?? eventAlias;
 
   if (messages.length === 0) {
     // Channel with no message detail — still useful as an untyped channel.
-    const name = uniqueName(methodName ?? `${prefix}${toPascalCase(channelLabel)}`, usedNames);
-    group.channels.push({ name, topic, direction, description, params, fields: [] });
+    const name = uniqueName(methodName ?? `${prefix}${toPascalCase(nameBase)}`, usedNames);
+    group.channels.push({ name, topic, direction, description, params, fields: [], eventAlias });
+    return;
+  }
+
+  if (messages.length > 1) {
+    // Multi-message channel: one method carrying a union of message types
+    // (the emitter generates the per-message interfaces + union).
+    const name = uniqueName(methodName ?? `${prefix}${toPascalCase(nameBase)}`, usedNames);
+    group.channels.push({
+      name,
+      topic,
+      direction,
+      description,
+      params,
+      fields: [],
+      eventAlias,
+      messages: messages.map((message) => ({
+        name: messageNameOf(message, channelLabel),
+        fields: fieldsFromPayload(message.payload as JsonRecord | undefined),
+        description: typeof message.description === 'string' ? message.description : undefined,
+      })),
+    });
     return;
   }
 
   for (const message of messages) {
-    const messageName =
-      (typeof message.__name === 'string' && message.__name) ||
-      (typeof message.name === 'string' && message.name) ||
-      (typeof message.title === 'string' && message.title) ||
-      channelLabel;
+    const messageName = messageNameOf(message, channelLabel);
     const base =
       methodName && messages.length === 1
         ? methodName
-        : `${prefix}${toPascalCase(messageName)}`;
+        : `${prefix}${toPascalCase(normalizeEventName(messageName, naming))}`;
     const name = uniqueName(base, usedNames);
     const fields = fieldsFromPayload(message.payload as JsonRecord | undefined);
     const messageDescription =
@@ -362,8 +483,18 @@ function emitChannelMethods(input: {
       description: messageDescription ?? description,
       params,
       fields,
+      eventAlias: normalizeEventName(messageName, naming),
     });
   }
+}
+
+function messageNameOf(message: MessageSource, channelLabel: string): string {
+  return (
+    (typeof message.__name === 'string' && message.__name) ||
+    (typeof message.name === 'string' && message.name) ||
+    (typeof message.title === 'string' && message.title) ||
+    channelLabel
+  );
 }
 
 /** Converts a JSON-schema payload into message fields (object payloads only). */

@@ -14,6 +14,8 @@ export {
   ContractDefinitionError,
   PathBuildError,
   AuthError,
+  AuthenticationError,
+  AuthorizationError,
   RequestAbortedError,
   TransportError,
   TimeoutError,
@@ -24,14 +26,20 @@ export {
   QueueFullError,
   EventsError,
   EventsConnectionError,
+  WebSocketApiError,
   MessageShapeError,
   GraphQLError,
+  WS_CLOSE_CODES,
+  shouldReconnectOnClose,
+  errorKind,
   asContractfulError,
   type Violation,
   type ContractfulErrorOptions,
   type HttpStatusErrorOptions,
   type ResponseShapeErrorOptions,
   type MessageShapeErrorOptions,
+  type WebSocketApiErrorOptions,
+  type ApiClientErrorKind,
 } from './errors.js';
 
 /* Param DSL --------------------------------------------------------------- */
@@ -93,11 +101,23 @@ export {
   auth,
   createClientCredentialsProvider,
   type AuthResolver,
-  type AuthContext,
+  type AuthSurface,
+  type AuthRequestInfo,
   type TokenProvider,
   type ClientCredentialsProvider,
   type ClientCredentialsProviderOptions,
 } from './middleware/auth.js';
+export type { AuthTransport, AuthContext, AuthMaterial, AuthProvider } from './auth/provider.js';
+export {
+  staticAuthProvider,
+  bearerAuthProvider,
+  apiKeyAuthProvider,
+  authProviderFromTokenManager,
+  wsTicketAuthProvider,
+  appendAuthQuery,
+  authProviderResolver,
+} from './auth/provider.js';
+export { createTokenManager, type Token, type TokenManager, type TokenManagerOptions } from './auth/token-manager.js';
 
 /* HTTP surface ------------------------------------------------------------- */
 export { Contractful, type QuickOptions } from './http/quick.js';
@@ -133,6 +153,7 @@ export {
   type EventsClientBase,
   type EventsChannelClientOptions,
   type EventsConnectionState,
+  type EventEnvelope,
   type MessageHandler,
   type SocketFactory,
   type SocketLike,
@@ -163,3 +184,13 @@ export {
   retryDelayFor,
   DEFAULT_RETRY_OPTIONS,
 } from './middleware/retry.js';
+
+/* Platform facade ------------------------------------------------------------ */
+export {
+  createPlatformClient,
+  createEventsCacheInvalidator,
+  type PlatformClientOptions,
+  type PlatformClient,
+  type ClientIdentity,
+  type EventInvalidationRule,
+} from './platform/index.js';

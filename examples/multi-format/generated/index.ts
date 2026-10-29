@@ -3,3 +3,15 @@ export * from './rest/index.js';
 export * from './events/index.js';
 export * from './support/index.js';
 export * from './catalog/index.js';
+export * from './platform.js';
+
+export const CLIENT_METADATA = {
+  generator: 'contractful-ts',
+  generatorVersion: "0.3.0",
+  sources: [
+    { file: "examples/multi-format/specs/rest.yaml", hash: "sha256:ca8c7f83cc9ec429030af8a96032e6a7c51780e3e12083d503d5a232522051c0" },
+    { file: "examples/multi-format/specs/events.yaml", hash: "sha256:377edad9d54f03dd12ff878440d8c0d17d1b8cd93423f2f57990b7734fd460b4" },
+    { file: "examples/multi-format/specs/support.postman_collection.json", hash: "sha256:2b6fb07ba335cb814bc67d86d7da95c25214143381a5ca5110b21b5d33a439b2" },
+    { file: "examples/multi-format/specs/catalog.graphql", hash: "sha256:e0122b6d72f1fdb54f97e20f25c12b1da221dec864183dbc8af2b19444592b26" },
+  ],
+} as const;

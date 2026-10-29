@@ -7,7 +7,7 @@
  * peer dependency, never a hard one.
  */
 
-import { EventsConnectionError, EventsError } from '../errors.js';
+import { EventsConnectionError, EventsError, WebSocketApiError } from '../errors.js';
 import type { EventsConnectionState, SocketFactory, SocketLike } from './types.js';
 
 /* -------------------------------------------------------------------------- */
@@ -15,7 +15,11 @@ import type { EventsConnectionState, SocketFactory, SocketLike } from './types.j
 /* -------------------------------------------------------------------------- */
 
 /** A WebSocket-constructor lookalike (browser, `ws`, undici). */
-type WebSocketCtor = new (url: string, protocols?: string[] | string) => SocketLike;
+type WebSocketCtor = new (
+  url: string,
+  protocols?: string[] | string,
+  options?: unknown,
+) => SocketLike;
 
 let wsModulePromise: Promise<WebSocketCtor | null> | null = null;
 
@@ -50,9 +54,12 @@ export async function resolveWebSocketCtor(): Promise<WebSocketCtor> {
  * Default factory: browser/Node-22+ global `WebSocket`, else a lazily
  * imported `ws`. Works in bundles and browsers without pulling `ws` in.
  */
-export const defaultSocketFactory: SocketFactory = async (url, protocols) => {
+export const defaultSocketFactory: SocketFactory = async (url, protocols, init) => {
   const Ctor = await resolveWebSocketCtor();
-  return new Ctor(url, protocols.length > 0 ? protocols : undefined);
+  // `ws` accepts (url, protocols, options) and honors options.headers;
+  // the browser constructor simply ignores the extra argument.
+  const extra = init?.headers && Object.keys(init.headers).length > 0 ? { headers: init.headers } : undefined;
+  return new Ctor(url, protocols.length > 0 ? protocols : undefined, extra);
 };
 
 /* -------------------------------------------------------------------------- */
@@ -79,6 +86,11 @@ export interface ReconnectingSocketOptions {
   url: string | (() => string | Promise<string>);
   /** Subprotocols (or provider, for subprotocol auth). */
   protocols?: string[] | (() => string[] | Promise<string[]>);
+  /** Upgrade-request headers (or provider, for header auth — Node `ws` only). */
+  headers?:
+    | Record<string, string>
+    | undefined
+    | (() => Record<string, string> | undefined | Promise<Record<string, string> | undefined>);
   socketFactory?: SocketFactory;
   reconnect?: boolean;
   reconnectMaxAttempts?: number;
@@ -93,6 +105,13 @@ export interface ReconnectingSocketOptions {
   /** Socket-level errors (connect failures, abnormal closes). */
   onError?: (error: unknown) => void;
   onStateChange?: (state: EventsConnectionState, info?: { error?: unknown }) => void;
+  /**
+   * Veto hook for non-user closes: return `false` to stop reconnecting (the
+   * connection then fails with a {@link WebSocketApiError} carrying the close
+   * code). May be async — used to run `AuthProvider.handleUnauthorized` for
+   * close code 4001 (token expired) before deciding.
+   */
+  shouldReconnect?: (info: { code?: number; reason?: string }) => boolean | Promise<boolean>;
 }
 
 interface Waiter {
@@ -120,6 +139,8 @@ export class ReconnectingSocket {
   #lastReceivedAt = 0;
   #openWaiters: Waiter[] = [];
   #closeWaiters: Waiter[] = [];
+  #lastClose: { code?: number; reason?: string } | null = null;
+  #forcedReconnect = false;
 
   constructor(options: ReconnectingSocketOptions) {
     this.#options = options;
@@ -186,6 +207,40 @@ export class ReconnectingSocket {
     });
   }
 
+  /**
+   * Forces a fresh connection with fresh URL/protocol/auth providers — used
+   * after out-of-band token refreshes (`AuthProvider.onAuthStateChanged`).
+   * Resolves once the new connection is open. No failed attempt is counted.
+   */
+  reconnect(): Promise<void> {
+    if (this.#state === 'idle' || this.#state === 'closed' || this.#state === 'failed') {
+      return this.open();
+    }
+    this.#userClosing = false;
+    this.#forcedReconnect = true;
+    if (this.#reconnectTimer) {
+      clearTimeout(this.#reconnectTimer);
+      this.#reconnectTimer = null;
+    }
+    const socket = this.#socket;
+    if (!socket) {
+      void this.#attempt();
+      return this.#waitOpen();
+    }
+    this.#setState('reconnecting');
+    try {
+      socket.close(1000, 'reconnecting');
+    } catch {
+      // Some sockets refuse to close cleanly; onclose may still fire.
+    }
+    return this.#waitOpen();
+  }
+
+  /** Resets the reconnect attempt budget (used after a successful auth refresh). */
+  resetAttempts(): void {
+    this.#failedAttempts = 0;
+  }
+
   /** Sends raw data; throws {@link EventsError} when not open. */
   send(data: string | ArrayBuffer | Blob): void {
     if (this.#state !== 'open' || !this.#socket) {
@@ -207,8 +262,10 @@ export class ReconnectingSocket {
         typeof this.#options.protocols === 'function'
           ? await this.#options.protocols()
           : this.#options.protocols;
+      const headers =
+        typeof this.#options.headers === 'function' ? await this.#options.headers() : this.#options.headers;
       const factory = this.#options.socketFactory ?? defaultSocketFactory;
-      const socket = await factory(url, protocols ?? []);
+      const socket = await factory(url, protocols ?? [], headers ? { headers } : undefined);
       if (this.#userClosing) {
         try {
           socket.close();
@@ -264,6 +321,7 @@ export class ReconnectingSocket {
     socket.onclose = (event: unknown) => {
       this.#teardownSocket();
       const info = event as { code?: number; reason?: string } | null;
+      this.#lastClose = { code: info?.code, reason: info?.reason };
       this.#options.onClose?.({
         code: info?.code,
         reason: info?.reason,
@@ -279,7 +337,15 @@ export class ReconnectingSocket {
         );
         return;
       }
-      this.#handleFailure();
+      if (this.#forcedReconnect) {
+        // Forced refresh (e.g. token rotation): reconnect immediately,
+        // without burning a reconnect-attempt.
+        this.#forcedReconnect = false;
+        this.#failedAttempts = 0;
+        void this.#attempt();
+        return;
+      }
+      void this.#handleFailure();
     };
     socket.onerror = (event: unknown) => {
       this.#lastError = event ?? this.#lastError;
@@ -287,10 +353,22 @@ export class ReconnectingSocket {
     };
   }
 
-  #handleFailure(): void {
+  async #handleFailure(): Promise<void> {
     this.#clearTimers();
     const maxAttempts = this.#options.reconnectMaxAttempts ?? 10;
-    const canReconnect = (this.#options.reconnect ?? true) && !this.#userClosing;
+    let canReconnect = (this.#options.reconnect ?? true) && !this.#userClosing;
+    if (canReconnect && this.#options.shouldReconnect && this.#lastClose) {
+      let verdict: boolean;
+      try {
+        verdict = await this.#options.shouldReconnect(this.#lastClose);
+      } catch (err) {
+        this.#lastError = err;
+        this.#options.onError?.(err);
+        verdict = false;
+      }
+      if (!verdict) canReconnect = false;
+      else this.#failedAttempts = 0; // policy approved the retry (e.g. after refresh)
+    }
     if (canReconnect && this.#failedAttempts < maxAttempts) {
       this.#failedAttempts++;
       this.#setState('reconnecting');
@@ -303,12 +381,20 @@ export class ReconnectingSocket {
       }, delay);
       return;
     }
-    this.#setState('failed');
-    this.#settle(this.#openWaiters, 'reject', this.#failureError());
+    const failure = this.#failureError();
+    this.#setState('failed', { error: failure });
+    this.#settle(this.#openWaiters, 'reject', failure);
     this.#settle(this.#closeWaiters, 'resolve');
   }
 
-  #failureError(): EventsConnectionError {
+  #failureError(): EventsError {
+    if (this.#lastClose && this.#options.shouldReconnect) {
+      const { code, reason } = this.#lastClose;
+      return new WebSocketApiError(
+        `WebSocket closed by the server${code ? ` (code ${code})` : ''}${reason ? `: ${reason}` : ''}`,
+        { code, reason },
+      );
+    }
     const cause = this.#lastError;
     const detail = cause instanceof Error ? `: ${cause.message}` : '';
     return new EventsConnectionError(
@@ -323,9 +409,9 @@ export class ReconnectingSocket {
     if (ms <= 0) return;
     this.#connectTimer = setTimeout(() => {
       try {
-        this.#socket?.close(4001, 'connect timeout');
+        this.#socket?.close(4002, 'connect timeout');
       } catch {
-        this.#handleFailure();
+        void this.#handleFailure();
       }
     }, ms);
   }

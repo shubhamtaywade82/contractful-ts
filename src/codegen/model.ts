@@ -9,7 +9,7 @@
  * codegen input.
  */
 
-import type { ApiGroupIR, ApiIR, ParamIR } from './openapi.js';
+import type { ApiGroupIR, ApiIR, ParamIR, SecuritySchemeIR } from './openapi.js';
 
 /** Every input format the codegen understands. */
 export type SpecKind = 'openapi' | 'asyncapi' | 'postman' | 'graphql' | 'api-model';
@@ -28,8 +28,26 @@ export interface ChannelIR {
   description?: string;
   /** Topic parameters (from `{param}` address segments). */
   params: ParamIR[];
-  /** Message payload fields. */
+  /** Message payload fields (single-message channels). */
   fields: ParamIR[];
+  /**
+   * Normalized event name (naming rules applied) — keys the generated
+   * `EVENT_NAMES` alias map for string-based subscriptions.
+   */
+  eventAlias?: string;
+  /**
+   * Message variants for channels that carry several message types — the
+   * emitter produces a discriminated union instead of one flat shape.
+   */
+  messages?: ChannelMessageIR[];
+}
+
+/** One message variant of a multi-message channel. */
+export interface ChannelMessageIR {
+  /** Variant name from the spec, e.g. `OrderCreated`. */
+  name: string;
+  fields: ParamIR[];
+  description?: string;
 }
 
 export interface ChannelGroupIR {
@@ -64,6 +82,8 @@ export interface CanonicalModel {
   origin?: string;
   groups: ApiGroupIR[];
   channelGroups: ChannelGroupIR[];
+  /** Security schemes declared by the source spec (HTTP side). */
+  securitySchemes?: SecuritySchemeIR[];
 }
 
 export function modelFromHttpIr(ir: ApiIR, origin?: string): CanonicalModel {
@@ -76,6 +96,7 @@ export function modelFromHttpIr(ir: ApiIR, origin?: string): CanonicalModel {
     origin,
     groups: ir.groups,
     channelGroups: [],
+    securitySchemes: ir.securitySchemes,
   };
 }
 
@@ -98,6 +119,7 @@ export function httpIrFromModel(model: CanonicalModel): ApiIR {
     version: model.specVersion,
     base: model.base,
     groups: model.groups,
+    securitySchemes: model.securitySchemes,
   };
 }
 

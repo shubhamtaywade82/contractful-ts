@@ -4,6 +4,26 @@ info:
   version: 1.4.0
 servers:
   - url: https://api.shop.test/v1
+security:
+  - BearerAuth: []
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    OAuth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.shop.test/oauth/token
+          scopes:
+            orders:read: Read orders
+            orders:write: Write orders
 paths:
   /products:
     get:
@@ -39,6 +59,8 @@ paths:
     post:
       tags: [orders]
       operationId: createOrder
+      security:
+        - OAuth2: [orders:write]
       requestBody:
         required: true
         content:
@@ -52,3 +74,23 @@ paths:
       responses:
         '201': { description: Created, content: { application/json: { schema: { type: object } } } }
         '422': { description: Validation error }
+  /orders/{orderId}:
+    get:
+      tags: [orders]
+      operationId: showOrder
+      security:
+        - OAuth2: [orders:read]
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: One order, content: { application/json: { schema: { type: object } } } }
+  /admin/stats:
+    get:
+      tags: [misc]
+      operationId: getAdminStats
+      x-client-domain: admin
+      responses:
+        '200': { description: Aggregate stats, content: { application/json: { schema: { type: object } } } }

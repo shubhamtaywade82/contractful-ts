@@ -2,19 +2,25 @@
 // Events: Shop Events (1.4.0) · group: events
 // Incoming messages are gated open-world; outgoing messages are validated closed-world.
 
+export interface ShopEventsEventsProductCreated {
+  productId: string;
+  title?: string;
+}
+
+export interface ShopEventsEventsProductPriceChanged {
+  productId: string;
+  price: number;
+}
+
+/** Union of the messages carried on "product.events". */
+export type ShopEventsEventsOnProductEventsMessage = ShopEventsEventsProductCreated | ShopEventsEventsProductPriceChanged;
+
 import { defineEvents, subscribe, publish, P } from "contractful-ts";
 
 export const shopEventsEvents = defineEvents({
   name: "Shop Events · events",
   url: "wss://events.shop.test/ws",
   channels: {
-    /** Fires when an order is created. */
-    onOrderCreated: subscribe("order.created", {
-      fields: {
-        orderId: P.string({ required: true, length: { min: 1 } }),
-        total: P.float({ min: 0 }),
-      },
-    }),
     /** Per-order shipping notifications. */
     onOrderShipped: subscribe("order/:orderId/shipped", {
       params: {
@@ -25,6 +31,8 @@ export const shopEventsEvents = defineEvents({
         eta: P.string(),
       },
     }),
+    /** Product lifecycle events fanned over one channel. */
+    onProductEvents: subscribe<ShopEventsEventsOnProductEventsMessage>("product.events"),
     /** Clients publish cancellations for open orders. */
     publishCancelOrder: publish("order.cancel", {
       fields: {

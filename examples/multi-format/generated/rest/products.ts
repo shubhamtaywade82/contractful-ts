@@ -15,12 +15,14 @@ export const productsApi = defineApi({
         sort: P.string({ in: "query", default: "asc", inclusion: ["asc", "desc"] }),
       },
       responds: [{ status: 200, type: "array" }],
+      security: ["BearerAuth"],
     }),
     showProduct: contract("GET /products/:productId", {
       params: {
         productId: P.string({ required: true, length: { min: 1 } }),
       },
       responds: [{ status: 200, type: "hash" }, { status: 404 }],
+      security: ["BearerAuth"],
     }),
   },
 });

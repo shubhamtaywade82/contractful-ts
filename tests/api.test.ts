@@ -268,7 +268,7 @@ describe('defineApi — response handling', () => {
   });
 
   it('throws for undeclared statuses', async () => {
-    const transport = new MockTransport(() => jsonResponse(403, { message: 'no' }));
+    const transport = new MockTransport(() => jsonResponse(404, { message: 'no' }));
     const api = makeApi(transport);
     await expect(api.listThings()).rejects.toThrow(/not declared/);
   });
