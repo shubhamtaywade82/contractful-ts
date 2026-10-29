@@ -210,4 +210,32 @@ describe('ReconnectingSocket', () => {
     await socket.close();
     await expect(opening).rejects.toBeInstanceOf(EventsError);
   });
+
+  it('does not double-reconnect when the policy check itself forces a reconnect', async () => {
+    // Reproduces the 4001 + token-refresh shape: the close policy runs
+    // `handleUnauthorized`, which clears the token, and the provider's
+    // `onAuthStateChanged` listener calls `reconnect()` before the policy
+    // resolves `true`. The forced attempt must supersede the scheduled
+    // retry — one new socket, not two.
+    const socket = new ReconnectingSocket({
+      url: 'wss://example.test/events',
+      socketFactory: fakeSocketFactory((s) => setTimeout(() => s.serverOpen(), 0)),
+      reconnectBaseDelayMs: 5,
+      shouldReconnect: async () => {
+        void socket.reconnect().catch(() => undefined); // out-of-band refresh
+        return true; // policy approves the retry
+      },
+    });
+
+    await socket.open();
+    expect(FakeSocket.all()).toHaveLength(1);
+    FakeSocket.first().serverClose(4001); // token expired
+
+    await waitFor(() => socket.state === 'open');
+    // Give a wrongly-scheduled retry timer room to (wrongly) fire.
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(FakeSocket.all()).toHaveLength(2);
+
+    await socket.close();
+  });
 });

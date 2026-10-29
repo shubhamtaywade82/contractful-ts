@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.3.1 — End-to-end ticket demo, and two inference/lifecycle fixes it exposed
+
+### End-to-end example: REST + WS shared ticket authentication
+
+- **`examples/ticket-demo/`** — a complete, deterministic demo of one
+  credential authority serving both transports: a `TokenManager` (single-flight
+  refresh) feeding a transport-aware `AuthProvider` that stamps
+  `Authorization: Bearer` for REST and mints a **one-time ticket** over an
+  authenticated REST call for every WebSocket (re)connection. Fifteen steps,
+  each asserted in `tests/ticket-demo.test.ts`:
+  - token fetch → ticket mint → `?ticket=` connect, subscribe frames,
+    REST reads/writes fanning events over the socket, parameterised
+    `shipment/:shipmentId/status` channels, publish/pong round trip,
+    closed-world rejection of a typo'd publish;
+  - drop + automatic reconnect on a **fresh single-use** ticket with the
+    subscription registry re-sent;
+  - REST 401 → refresh + single retry **and** proactive rotation of the
+    healthy socket onto the new credentials, sharing exactly one
+    `/auth/token` call (single-flight);
+  - WS close 4001 → the same shared recovery;
+  - `getLastEventId()` powering a REST catch-up, a rogue client's replayed
+    ticket refused with 4003, and one `dispose()` for both transports.
+- The demo ships `MockCourierServer` — an in-process double implementing
+  the library's `Transport` and `SocketFactory` interfaces as a strict
+  ticket authority — plus `tsconfig.check.json`, so the whole example is
+  strict-`tsc`-checked against the built package in CI.
+
+### Fixed: required-parameter inference survived no context (type-level)
+
+- Declared-required params were silently inferred as **optional keys**
+  (and, worse, inverted in some contexts): `RequiredParamKeys` matched
+  `P[K] extends { __required: true }`, but the phantom is declared
+  `__required?: R` (type `R | undefined`), so the match never held. It now
+  checks `NonNullable<P[K]['__required']> extends true`.
+- The param factories (`P.string` etc.) used a single generic signature
+  whose `R` was inferred from the **contextual return type** inside
+  `contract(...)` / `defineApi(...)`, widening it to `boolean` (when
+  `required: true` was passed) or `any` (when it was not) — flipping which
+  keys `InferArgs` marked required. Every factory is now declared with
+  overloads whose return types spell the phantom out concretely
+  (`ParamSpec<string, true>` / `ParamSpec<string, false>`), which contextual
+  typing cannot remap.
+- Net effect: `api.show()` now fails to compile when a required param is
+  missing (as documented), all-optional contracts stay callable with no
+  arguments, and `defineEvents` topic params (`ctx.params`) are fully typed.
+- Known limitation (pre-existing, now documented in the example): pinning a
+  contract's return type with `contract<SomeType>(...)` makes TypeScript
+  skip inference for the params generic — such contracts fall back to the
+  open index-signature args type, with closed-world validation remaining
+  the runtime guard.
+
+### Fixed: double reconnect when the close policy itself rotates credentials
+
+- When a provider cleared its token inside `handleUnauthorized` **and**
+  wired `onAuthStateChanged` (e.g. `authProviderFromTokenManager`), a 4001
+  close started two competing reconnections — the forced rotation from the
+  state-change listener plus the policy-approved retry timer — leaving an
+  orphaned open socket. `ReconnectingSocket` now skips the scheduled retry
+  when a forced attempt already wired a socket, serialises concurrent
+  attempt starts, and only sets the forced-reconnect flag when there is a
+  live socket whose `onclose` can consume it.
+
 ## 0.3.0 — Authentication, token management and the unified platform facade
 
 The release implements the full platform-client design: injectable,

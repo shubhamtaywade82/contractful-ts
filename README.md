@@ -197,6 +197,8 @@ interface AuthProvider {
 - `AuthMaterial` is whatever the server accepts: `headers`, `query`, `cookie`, `protocols` (WebSocket subprotocols) or `connectMessage` (an auth frame sent right after connect).
 - `wsTicketAuthProvider(fetchTicket)` implements the recommended browser pattern: fetch a short-lived one-time ticket over REST, connect with `?ticket=...`.
 
+> A complete, tested walkthrough of this pattern — one credential authority feeding both transports, single-flight refresh shared by a REST retry and a socket rotation, 4001/401 recovery, single-use ticket enforcement — lives in [`examples/ticket-demo/`](examples/ticket-demo/).
+
 **Deterministic refresh semantics.** A `401` triggers `handleUnauthorized` at most *once* per request; the request is retried only when the hook resolves `true`, and the final failure is an `AuthenticationError` (kind: `authentication`). A `403` is *never* auto-refreshed — it surfaces as `AuthorizationError` (kind: `authorization`) because fresh tokens of the same principal cannot fix a permission. `errorKind(err)` maps every library error onto that shared taxonomy (`authentication | authorization | validation | network | timeout | server | websocket | unknown`).
 
 **Cookie sessions + CSRF.** Use `credentials: 'include'` on the underlying axios instance and stamp the anti-CSRF header on state-changing requests:
@@ -555,6 +557,7 @@ for (const file of bundle.files) console.log(file.path, file.content.length);
 
 ## Examples
 
+- [`examples/ticket-demo/`](examples/ticket-demo/) — **end-to-end**: REST + WebSocket sharing one ticket authority (token manager → one-time WS tickets → 401/4001 recovery → REST catch-up), fully deterministic against an in-process mock server; covered by `tests/ticket-demo.test.ts`
 - [`examples/github/github.ts`](examples/github/github.ts) — public API, cursor pagination, closed-schema demos
 - [`examples/binance/binance.ts`](examples/binance/binance.ts) — Binance-style spot connector: HMAC-SHA256 request signing via `beforeRequest`, `X-MBX-APIKEY`, rate limiting, idempotent order placement (run: `node examples/binance/binance.ts`)
 - [`examples/openapi/petstore.yaml`](examples/openapi/petstore.yaml) + `examples/openapi/generated/` — spec and generated connector
@@ -572,8 +575,9 @@ src/
   middleware/   auth resolvers, retry policy, circuit breaker, rate limiter
   codegen/      format detection, canonical model, OpenAPI/AsyncAPI/Postman/
                 GraphQL adapters, TS emitters (runtime + standalone), CLI
-tests/          vitest suite (265 tests — unit + round-trips)
-examples/       GitHub + Binance-style connectors, OpenAPI + multi-format fixtures
+tests/          vitest suite (315 tests — unit + round-trips + the e2e ticket demo)
+examples/       end-to-end ticket demo, GitHub + Binance-style connectors,
+                OpenAPI + multi-format fixtures
 ```
 
 ## Development
@@ -584,7 +588,7 @@ npm run build    # tsc -> dist/
 npm test         # build + vitest run
 ```
 
-The test suite covers validation, path building, response classification, retry/backoff math, circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, the events runtime against a scripted fake socket (reconnects, heartbeats, auth modes, routing), the graphql-transport-ws protocol, every format adapter, multi-source configs, and codegen round-trips that import generated files and run them — including strict `tsc` checks of generated output.
+The test suite covers validation, path building, response classification, retry/backoff math, circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, the events runtime against a scripted fake socket (reconnects, heartbeats, auth modes, routing), the graphql-transport-ws protocol, every format adapter, multi-source configs, codegen round-trips that import generated files and run them — including strict `tsc` checks of generated output — and an end-to-end ticket-authentication demo (`examples/ticket-demo/`) that runs the full REST + WS lifecycle against an in-process mock server.
 
 ## License
 

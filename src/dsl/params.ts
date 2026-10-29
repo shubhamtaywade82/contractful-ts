@@ -120,6 +120,24 @@ export type ParamsShape = Record<string, AnyParamSpec>;
 /* Factories                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/*
+ * Every factory is declared with overloads whose return types spell out the
+ * `__required` phantom concretely (`true` / `false`). A single generic
+ * signature (`options: O & { required?: R }): ParamSpec<T, R>`) cannot survive
+ * contextual typing: inside `contract(...)` / `defineApi(...)` the generic `R`
+ * gets remapped from the contextual type and widens to `boolean` (when
+ * `required: true` was passed) or `any` (when it was not) — silently flipping
+ * which keys `InferArgs` marks as required. Concrete overload returns have no
+ * inference variables left to poison, so required-ness survives any context.
+ */
+
+/** `required: true` — pins the phantom to `true`. */
+type WithRequired<O> = O & { required: true };
+/** No `required` (or `required: false`) — pins the phantom to `false`. */
+type WithOptional<O> = O & { required?: false };
+/** Non-literal `required` — required-ness decided at runtime only. */
+type WithMaybeRequired<O> = O & { required?: boolean };
+
 /**
  * Declares a string parameter.
  *
@@ -127,10 +145,11 @@ export type ParamsShape = Record<string, AnyParamSpec>;
  * params.string({ as: 'sort', inclusion: ['asc', 'desc'], default: 'asc' })
  * ```
  */
-export function string<R extends boolean = false>(
-  options: StringParamOptions & { required?: R } = {},
-): ParamSpec<string, R> {
-  return { kind: 'string', ...options } as ParamSpec<string, R>;
+export function string(options: WithRequired<StringParamOptions>): ParamSpec<string, true>;
+export function string(options?: WithOptional<StringParamOptions>): ParamSpec<string, false>;
+export function string(options?: WithMaybeRequired<StringParamOptions>): ParamSpec<string, boolean>;
+export function string(options: StringParamOptions = {}): ParamSpec<string, boolean> {
+  return { kind: 'string', ...options } as ParamSpec<string, boolean>;
 }
 
 /**
@@ -140,10 +159,11 @@ export function string<R extends boolean = false>(
  * params.integer({ as: 'per_page', min: 1, max: 100, default: 30 })
  * ```
  */
-export function integer<R extends boolean = false>(
-  options: NumberParamOptions & { required?: R } = {},
-): ParamSpec<number, R> {
-  return { kind: 'integer', ...options } as ParamSpec<number, R>;
+export function integer(options: WithRequired<NumberParamOptions>): ParamSpec<number, true>;
+export function integer(options?: WithOptional<NumberParamOptions>): ParamSpec<number, false>;
+export function integer(options?: WithMaybeRequired<NumberParamOptions>): ParamSpec<number, boolean>;
+export function integer(options: NumberParamOptions = {}): ParamSpec<number, boolean> {
+  return { kind: 'integer', ...options } as ParamSpec<number, boolean>;
 }
 
 /**
@@ -153,20 +173,26 @@ export function integer<R extends boolean = false>(
  * params.float({ min: 0, max: 1 })
  * ```
  */
-export function float<R extends boolean = false>(
-  options: NumberParamOptions & { required?: R } = {},
-): ParamSpec<number, R> {
-  return { kind: 'float', ...options } as ParamSpec<number, R>;
+export function float(options: WithRequired<NumberParamOptions>): ParamSpec<number, true>;
+export function float(options?: WithOptional<NumberParamOptions>): ParamSpec<number, false>;
+export function float(options?: WithMaybeRequired<NumberParamOptions>): ParamSpec<number, boolean>;
+export function float(options: NumberParamOptions = {}): ParamSpec<number, boolean> {
+  return { kind: 'float', ...options } as ParamSpec<number, boolean>;
 }
 
 /**
  * Declares a boolean parameter. The strings `"true"` / `"false"` are coerced.
  */
-export function boolean<R extends boolean = false>(
-  options: CommonParamOptions & { required?: R } = {},
-): ParamSpec<boolean, R> {
-  return { kind: 'boolean', ...options } as ParamSpec<boolean, R>;
+export function boolean(options: WithRequired<CommonParamOptions>): ParamSpec<boolean, true>;
+export function boolean(options?: WithOptional<CommonParamOptions>): ParamSpec<boolean, false>;
+export function boolean(options?: WithMaybeRequired<CommonParamOptions>): ParamSpec<boolean, boolean>;
+export function boolean(options: CommonParamOptions = {}): ParamSpec<boolean, boolean> {
+  return { kind: 'boolean', ...options } as ParamSpec<boolean, boolean>;
 }
+
+/** Element type produced by an array param's `of` spec. */
+type ArrayElements<S extends AnyParamSpec | undefined> =
+  S extends AnyParamSpec ? Array<S['__tsType']> : unknown[];
 
 /**
  * Declares an array parameter with an optional element spec.
@@ -175,10 +201,17 @@ export function boolean<R extends boolean = false>(
  * params.array({ of: params.string(), min: 1 })
  * ```
  */
-export function array<S extends AnyParamSpec | undefined = undefined, R extends boolean = false>(
-  options: ArrayParamOptions & { required?: R; of?: S } = {},
-): ParamSpec<S extends AnyParamSpec ? Array<S['__tsType']> : unknown[], R> {
-  return { kind: 'array', ...options } as any;
+export function array<S extends AnyParamSpec | undefined = undefined>(
+  options: WithRequired<ArrayParamOptions> & { of?: S },
+): ParamSpec<ArrayElements<S>, true>;
+export function array<S extends AnyParamSpec | undefined = undefined>(
+  options?: WithOptional<ArrayParamOptions> & { of?: S },
+): ParamSpec<ArrayElements<S>, false>;
+export function array<S extends AnyParamSpec | undefined = undefined>(
+  options?: WithMaybeRequired<ArrayParamOptions> & { of?: S },
+): ParamSpec<ArrayElements<S>, boolean>;
+export function array(options: ArrayParamOptions = {}): ParamSpec<unknown[], boolean> {
+  return { kind: 'array', ...options } as ParamSpec<unknown[], boolean>;
 }
 
 /**
@@ -188,10 +221,11 @@ export function array<S extends AnyParamSpec | undefined = undefined, R extends 
  * params.hash({ as: 'metadata' })
  * ```
  */
-export function hash<R extends boolean = false>(
-  options: HashParamOptions & { required?: R } = {},
-): ParamSpec<Record<string, unknown>, R> {
-  return { kind: 'hash', ...options } as ParamSpec<Record<string, unknown>, R>;
+export function hash(options: WithRequired<HashParamOptions>): ParamSpec<Record<string, unknown>, true>;
+export function hash(options?: WithOptional<HashParamOptions>): ParamSpec<Record<string, unknown>, false>;
+export function hash(options?: WithMaybeRequired<HashParamOptions>): ParamSpec<Record<string, unknown>, boolean>;
+export function hash(options: HashParamOptions = {}): ParamSpec<Record<string, unknown>, boolean> {
+  return { kind: 'hash', ...options } as ParamSpec<Record<string, unknown>, boolean>;
 }
 
 /**
@@ -201,11 +235,23 @@ export function hash<R extends boolean = false>(
  * params.custom<Date>((v) => v instanceof Date || 'expected a Date')
  * ```
  */
-export function custom<T, R extends boolean = false>(
+export function custom<T>(
   check: (value: unknown) => true | string,
-  options: Omit<CustomParamOptions, 'check'> & { required?: R } = {},
-): ParamSpec<T, R> {
-  return { kind: 'custom', check, ...options } as ParamSpec<T, R>;
+  options: WithRequired<Omit<CustomParamOptions, 'check'>>,
+): ParamSpec<T, true>;
+export function custom<T>(
+  check: (value: unknown) => true | string,
+  options?: WithOptional<Omit<CustomParamOptions, 'check'>>,
+): ParamSpec<T, false>;
+export function custom<T>(
+  check: (value: unknown) => true | string,
+  options?: WithMaybeRequired<Omit<CustomParamOptions, 'check'>>,
+): ParamSpec<T, boolean>;
+export function custom<T>(
+  check: (value: unknown) => true | string,
+  options: Omit<CustomParamOptions, 'check'> = {},
+): ParamSpec<T, boolean> {
+  return { kind: 'custom', check, ...options } as ParamSpec<T, boolean>;
 }
 
 /**
@@ -227,12 +273,18 @@ export const P = params;
 /** Flattens an intersection type for nicer hover / error messages. */
 export type Pretty<T> = { [K in keyof T]: T[K] } & {};
 
+/**
+ * Keyed off the `__required` phantom. `NonNullable` matters: the phantom
+ * is declared optional (`__required?: R`), so its type is `R | undefined`
+ * and a bare `extends { __required: true }` would never match — which
+ * silently made every declared-required param an optional key.
+ */
 type RequiredParamKeys<P extends ParamsShape> = {
-  [K in keyof P]-?: P[K] extends { __required: true } ? K : never;
+  [K in keyof P]-?: NonNullable<P[K]['__required']> extends true ? K : never;
 }[keyof P];
 
 type OptionalParamKeys<P extends ParamsShape> = {
-  [K in keyof P]-?: P[K] extends { __required: true } ? never : K;
+  [K in keyof P]-?: NonNullable<P[K]['__required']> extends true ? never : K;
 }[keyof P];
 
 /**

@@ -136,6 +136,8 @@ export class ReconnectingSocket {
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #connectTimer: ReturnType<typeof setTimeout> | null = null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** True while an attempt is resolving its URL/auth providers and factory. */
+  #attemptBusy = false;
   #lastReceivedAt = 0;
   #openWaiters: Waiter[] = [];
   #closeWaiters: Waiter[] = [];
@@ -217,7 +219,6 @@ export class ReconnectingSocket {
       return this.open();
     }
     this.#userClosing = false;
-    this.#forcedReconnect = true;
     if (this.#reconnectTimer) {
       clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = null;
@@ -227,6 +228,11 @@ export class ReconnectingSocket {
       void this.#attempt();
       return this.#waitOpen();
     }
+    // Only a live socket can consume the forced-reconnect flag (its
+    // `onclose` branch). Without one there is no close coming to consume
+    // it, and a stray `true` would make the *next* genuine failure skip
+    // backoff and policy checks entirely.
+    this.#forcedReconnect = true;
     this.#setState('reconnecting');
     try {
       socket.close(1000, 'reconnecting');
@@ -254,6 +260,19 @@ export class ReconnectingSocket {
   /* ---------------------------------------------------------------------- */
 
   async #attempt(): Promise<void> {
+    // A forced reconnect (token rotation through `onAuthStateChanged`) can
+    // start an attempt while a policy-approved retry is still being
+    // scheduled — the in-flight attempt supersedes it.
+    if (this.#attemptBusy) return;
+    this.#attemptBusy = true;
+    try {
+      await this.#connect();
+    } finally {
+      this.#attemptBusy = false;
+    }
+  }
+
+  async #connect(): Promise<void> {
     this.#setState(this.#everOpened || this.#failedAttempts > 0 ? 'reconnecting' : 'connecting');
     try {
       const url =
@@ -377,6 +396,9 @@ export class ReconnectingSocket {
       const delay = backoffDelayMs(this.#failedAttempts, base, max);
       this.#reconnectTimer = setTimeout(() => {
         this.#reconnectTimer = null;
+        // A forced reconnect (or an explicit open) may have already wired a
+        // fresh socket while the async policy check ran — don't stomp it.
+        if (this.#socket !== null) return;
         void this.#attempt();
       }, delay);
       return;

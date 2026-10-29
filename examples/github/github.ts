@@ -86,10 +86,12 @@ async function main(): Promise<void> {
   console.log(GitHubApi.describe());
   console.log();
 
-  // Closed request schema: typos fail before any HTTP traffic.
+  // Closed request schema: unknown keys are rejected before any HTTP
+  // traffic. (Note: pinning the return type with `contract<GitHubUser[]>`
+  // opts this contract out of compile-time param inference — the guard
+  // here is the runtime closed-world validation.)
   try {
-    // @ts-expect-error deliberate typo to demonstrate runtime rejection
-    await github.listUsers({ pagee: 1 });
+    await github.listUsers({ pagee: 1 } as never);
   } catch (err) {
     console.log('rejected bad input:', (err as Error).message);
   }
