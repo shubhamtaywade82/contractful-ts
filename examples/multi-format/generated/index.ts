@@ -7,7 +7,7 @@ export * from './platform.js';
 
 export const CLIENT_METADATA = {
   generator: 'contractful-ts',
-  generatorVersion: "0.3.0",
+  generatorVersion: "0.4.0",
   sources: [
     { file: "examples/multi-format/specs/rest.yaml", hash: "sha256:ca8c7f83cc9ec429030af8a96032e6a7c51780e3e12083d503d5a232522051c0" },
     { file: "examples/multi-format/specs/events.yaml", hash: "sha256:377edad9d54f03dd12ff878440d8c0d17d1b8cd93423f2f57990b7734fd460b4" },

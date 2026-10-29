@@ -31,5 +31,8 @@ jobs:
       - name: Build (tsc, strict)
         run: npm run build
 
+      - name: Typecheck (src + compile-time test contracts)
+        run: npm run typecheck
+
       - name: Test (vitest)
         run: npx vitest run

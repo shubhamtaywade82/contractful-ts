@@ -64,10 +64,12 @@ export {
 /* Contract + API DSL ------------------------------------------------------- */
 export {
   contract,
+  returns,
   type ContractOptions,
   type ContractDefinition,
   type ContractArgs,
   type ContractReturn,
+  type ReturnTypedDecl,
 } from './dsl/contract.js';
 export {
   defineApi,
@@ -94,7 +96,9 @@ export type {
   CircuitOptions,
   CircuitState,
   RateLimitOptions,
+  ContractRetryMode,
 } from './types.js';
+export { BODY_METHODS, IDEMPOTENT_METHODS } from './types.js';
 
 /* Auth --------------------------------------------------------------------- */
 export {

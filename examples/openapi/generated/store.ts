@@ -22,6 +22,7 @@ export const storeApi = defineApi({
         status: P.string({ in: "body", inclusion: ["placed", "approved", "delivered"], describe: "Order Status" }),
         complete: P.boolean({ in: "body" }),
       },
+      bodyRequired: true,
       responds: [{ status: 200, type: "hash" }, { status: 405 }],
     }),
     /** Find purchase order by ID */

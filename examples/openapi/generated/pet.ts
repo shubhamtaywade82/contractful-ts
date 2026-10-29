@@ -18,6 +18,7 @@ export const petApi = defineApi({
         tags: P.array({ in: "body", of: P.hash() }),
         status: P.string({ in: "body", inclusion: ["available", "pending", "sold"], describe: "pet status in the store" }),
       },
+      bodyRequired: true,
       responds: [{ status: 200, type: "hash" }, { status: 400 }, { status: 404 }, { status: 422 }],
     }),
     /** Add a new pet to the store — Add a new pet to the store. */
@@ -30,6 +31,7 @@ export const petApi = defineApi({
         tags: P.array({ in: "body", of: P.hash() }),
         status: P.string({ in: "body", inclusion: ["available", "pending", "sold"], describe: "pet status in the store" }),
       },
+      bodyRequired: true,
       responds: [{ status: 200, type: "hash" }, { status: 405 }],
     }),
     /** Finds Pets by status — Multiple status values can be provided with comma separated strings */

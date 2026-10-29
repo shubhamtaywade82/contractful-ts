@@ -143,10 +143,27 @@ function emitStandaloneGroup(ir: ApiIR, group: ApiGroupIR, options: StandaloneEm
       }
     }
     if (bodyParams.length > 0) {
-      lines.push(`      const body: Record<string, unknown> = {};`);
-      for (const param of bodyParams) {
-        lines.push(`      if (args.${param.tsName} !== undefined) body[${JSON.stringify(param.wireName)}] = args.${param.tsName};`);
+      const rawParam = bodyParams.find((p) => p.raw);
+      if (rawParam) {
+        // The parameter IS the payload (scalar / array / free-form body).
+        lines.push(`      let body: unknown = args.${rawParam.tsName};`);
+        if (op.bodyRequired) {
+          lines.push(`      if (body === undefined) body = {};`);
+        }
+      } else if (op.form) {
+        lines.push(`      const body = new URLSearchParams();`);
+        for (const param of bodyParams) {
+          lines.push(`      if (args.${param.tsName} !== undefined) body.set(${JSON.stringify(param.wireName)}, String(args.${param.tsName}));`);
+        }
+      } else {
+        // Flattened object body — always initialized, satisfying bodyRequired.
+        lines.push(`      const body: Record<string, unknown> = {};`);
+        for (const param of bodyParams) {
+          lines.push(`      if (args.${param.tsName} !== undefined) body[${JSON.stringify(param.wireName)}] = args.${param.tsName};`);
+        }
       }
+    } else if (op.bodyRequired) {
+      lines.push(`      const body: unknown = ${op.form ? 'new URLSearchParams()' : '{}'};`);
     }
     if (headerParams.length > 0) {
       lines.push(`      const headers: Record<string, string> = { ...(options.headers ?? {}) };`);
@@ -197,17 +214,20 @@ export async function request<T = unknown>(
   },
   path: string,
   query?: URLSearchParams,
-  body?: Record<string, unknown>,
+  body?: unknown,
 ): Promise<T> {
   const doFetch = init.fetchImpl ?? fetch;
   const url = \`\${init.baseUrl.replace(/\\/+$/, '')}\${path}\${query && query.size > 0 ? \`?\${query.toString()}\` : ''}\`;
+  const isForm = body instanceof URLSearchParams;
   const res = await doFetch(url, {
     method: init.method,
     headers: {
-      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+      ...(body !== undefined
+        ? { 'content-type': isForm ? 'application/x-www-form-urlencoded' : 'application/json' }
+        : {}),
       ...(init.headers ?? {}),
     },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? (isForm ? body.toString() : JSON.stringify(body)) : undefined,
   });
   const text = await res.text();
   const parsed = text.length > 0 ? safeJson(text) : undefined;

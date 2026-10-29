@@ -152,7 +152,7 @@ describe('dereference', () => {
     expect(doc.data.properties.id.type).toBe('integer');
   });
 
-  it('breaks cycles instead of recursing forever', () => {
+  it('breaks cycles with a free-form object placeholder (never a silently-wrong scalar) and warns', () => {
     const spec = parseSpecText(
       JSON.stringify({
         components: {
@@ -167,8 +167,16 @@ describe('dereference', () => {
         },
       }),
     );
-    const doc = dereference({ $ref: '#/components/schemas/Node' }, spec) as any;
-    expect(doc.properties.child).toEqual({});
+    const warnings: string[] = [];
+    const doc = dereference({ $ref: '#/components/schemas/Node' }, spec, warnings) as any;
+    // The cycle is cut with a typed free-form object, not an empty `{}` that
+    // would fall through to `P.string()` in the emitter.
+    expect(doc.properties.child).toEqual({
+      type: 'object',
+      description: 'recursive schema (#/components/schemas/Node) — free-form',
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/recursive \$ref #\/components\/schemas\/Node/);
   });
 
   it('rejects external refs', () => {

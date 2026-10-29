@@ -17,22 +17,80 @@
 import { ContractDefinitionError } from '../errors.js';
 import { parseRoute, type ParsedRoute } from '../http/path.js';
 import type { AnyParamSpec, InferArgs, ParamsShape } from './params.js';
-import type { ResponseDecl } from '../types.js';
+import type { ContractRetryMode, ResponseDecl } from '../types.js';
 
-export interface ContractOptions<P extends ParamsShape> {
+/**
+ * A `responds` entry carrying a phantom return type. `returns<T>(...)` stamps
+ * it so `contract(...)` can infer BOTH the argument object (from `params`)
+ * and the method's return type (from `responds`) in the same call — the fix
+ * for the limitation that pinning `contract<T>(...)` disables argument
+ * inference (supplying an explicit type argument makes TypeScript skip
+ * inference for every remaining type parameter).
+ */
+export interface ReturnTypedDecl<R = unknown> extends ResponseDecl {
+  readonly __returnType?: R;
+}
+
+/**
+ * Pins a contract's return type through its `responds` list, keeping full
+ * argument-type inference:
+ *
+ * ```ts
+ * contract('GET /users', {
+ *   params: { since: P.integer() },
+ *   responds: returns<User[]>([{ status: 200, type: 'array' }]),
+ * })
+ * ```
+ *
+ * `contract<User[]>(...)` remains supported for simple cases, but there the
+ * params generic falls back to its default (open index-signature args) —
+ * prefer `returns<T>(...)` whenever you pin a return type on a contract
+ * that declares params.
+ */
+export function returns<R>(decls: ResponseDecl[]): ReturnTypedDecl<R>[] {
+  return decls as ReturnTypedDecl<R>[];
+}
+
+export interface ContractOptions<P extends ParamsShape, R = unknown> {
   /** Typed parameter declarations. */
   params?: P;
   /** Statuses (and optional top-level body types) the API answers with. */
-  responds?: ResponseDecl[];
+  responds?: Array<ResponseDecl & { readonly __returnType?: R }>;
   /** Free-form documentation, surfaced by `describe()`. */
   description?: string;
   /** Organizational tags, used by `describe()` and tooling. */
   tags?: string[];
   /**
    * Marks the operation as idempotent: every call sends an
-   * `Idempotency-Key` header (per-call override with `_idempotencyKey`).
+   * `Idempotency-Key` header (per-call override with `_idempotencyKey`),
+   * kept STABLE across retry attempts, and ambiguous failures (network
+   * errors, timeouts, 5xx) become retryable for this contract — the key is
+   * the enforced-duplication mechanism that makes the retry safe.
    */
   idempotent?: boolean | { header: string };
+  /**
+   * Retry eligibility for this contract:
+   * - `'auto'` (default) — retry only when the method is inherently
+   *   idempotent (GET/HEAD/OPTIONS/PUT/DELETE), the contract is `idempotent`,
+   *   an explicit `_idempotencyKey` is supplied, or the API opted in with
+   *   `retry.retryUnsafeMethods`.
+   * - `'always'` — explicit opt-in: retry this contract after ambiguous
+   *   failures regardless of method.
+   * - `'never'` — no retries at all, not even server-sanctioned 429s.
+   */
+  retry?: ContractRetryMode;
+  /**
+   * Sends body parameters as `application/x-www-form-urlencoded` instead of
+   * JSON (Swagger 2.0 `formData`, HTML form APIs). Multipart file uploads
+   * are not supported by this flag.
+   */
+  form?: boolean;
+  /**
+   * Guarantees a body is sent (an empty `{}` / empty form) even when every
+   * body parameter is optional and none was provided — for specs that mark
+   * the request body as required while leaving all its properties optional.
+   */
+  bodyRequired?: boolean;
   /** Per-contract timeout in milliseconds. */
   timeout?: number;
   /** Per-contract retry budget. */
@@ -76,7 +134,7 @@ export interface ContractDefinition<R = unknown, A = Record<string, never>> {
  */
 export function contract<R = unknown, P extends ParamsShape = ParamsShape>(
   route: string,
-  options: ContractOptions<P> = {},
+  options: ContractOptions<P, R> = {},
 ): ContractDefinition<R, InferArgs<P>> {
   let parsed: ParsedRoute;
   try {
@@ -105,10 +163,12 @@ export type ContractReturn<D> = D extends ContractDefinition<infer R, any> ? R :
 
 function validateContractShape<P extends ParamsShape>(
   route: ParsedRoute,
-  options: ContractOptions<P>,
+  options: ContractOptions<P, any>,
 ): void {
   const specs = options.params ?? {};
 
+  let rawBodyParams = 0;
+  let regularBodyParams = 0;
   for (const [name, spec] of Object.entries(specs) as [string, AnyParamSpec][]) {
     if (spec.required && spec.default !== undefined) {
       throw new ContractDefinitionError(
@@ -120,6 +180,33 @@ function validateContractShape<P extends ParamsShape>(
         `Parameter ${JSON.stringify(name)} is declared in: 'path' but the route ${JSON.stringify(route.template)} has no :${name} placeholder.`,
       );
     }
+    if (spec.raw) {
+      rawBodyParams++;
+      const location = spec.in ?? 'auto';
+      if (location !== 'body' && location !== 'auto') {
+        throw new ContractDefinitionError(
+          `Parameter ${JSON.stringify(name)} declares raw: true but is placed in ${JSON.stringify(location)} — raw params must be body parameters.`,
+        );
+      }
+    } else if (spec.in === 'body') {
+      regularBodyParams++;
+    }
+  }
+  if (rawBodyParams > 1) {
+    throw new ContractDefinitionError(
+      'At most one raw body parameter may be declared — it replaces the entire request body.',
+    );
+  }
+  if (rawBodyParams === 1 && regularBodyParams > 0) {
+    throw new ContractDefinitionError(
+      'A raw body parameter cannot be combined with regular body parameters — it replaces the entire request body.',
+    );
+  }
+
+  if (options.retry !== undefined && !['auto', 'always', 'never'].includes(options.retry)) {
+    throw new ContractDefinitionError(
+      `Invalid retry mode ${JSON.stringify(options.retry)} — expected 'auto', 'always' or 'never'.`,
+    );
   }
 
   for (const placeholder of route.pathParams) {

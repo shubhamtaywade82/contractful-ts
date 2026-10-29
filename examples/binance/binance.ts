@@ -13,6 +13,7 @@
  */
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 
 // In your own project, import from the package instead:
 //   import { contract, defineApi, P } from 'contractful-ts';
@@ -120,17 +121,25 @@ export const BinanceSpotApi = defineApi({
 
     placeOrder: contract<OrderAck>('POST /api/v3/order', {
       description: 'Place a new order (signed).',
-      idempotent: { header: 'X-Idempotency-Key' },
+      // Binance spot has no server-side idempotency key: an ambiguous
+      // failure (timeout / dropped connection / 5xx) may have placed the
+      // order, so the client must NOT auto-retry — surface the error and
+      // reconcile via `newClientOrderId` (Binance's client-side dedup key)
+      // before resubmitting. This mirrors the library's method-aware retry
+      // safety, made explicit.
+      retry: 'never',
       params: {
-        symbol: P.string({ required: true, pattern: /^[A-Z0-9]{5,20}$/ }),
-        side: P.string({ required: true, inclusion: [...ORDER_SIDES] }),
-        type: P.string({ required: true, inclusion: [...ORDER_TYPES] }),
-        timeInForce: P.string({ as: 'timeInForce', inclusion: [...TIME_IN_FORCE] }),
-        quantity: P.float({ min: 0 }),
-        quoteOrderQty: P.float({ min: 0, as: 'quoteOrderQty' }),
-        price: P.float({ min: 0 }),
-        newClientOrderId: P.string({ as: 'newClientOrderId', length: { max: 36 } }),
-        recvWindow: P.integer({ min: 5_000, max: 60_000, default: 10_000 }),
+        // Binance signed endpoints take their parameters on the query
+        // string (that is what gets HMAC-signed) — not a JSON body.
+        symbol: P.string({ required: true, pattern: /^[A-Z0-9]{5,20}$/, in: 'query' }),
+        side: P.string({ required: true, inclusion: [...ORDER_SIDES], in: 'query' }),
+        type: P.string({ required: true, inclusion: [...ORDER_TYPES], in: 'query' }),
+        timeInForce: P.string({ as: 'timeInForce', inclusion: [...TIME_IN_FORCE], in: 'query' }),
+        quantity: P.float({ min: 0, in: 'query' }),
+        quoteOrderQty: P.float({ min: 0, as: 'quoteOrderQty', in: 'query' }),
+        price: P.float({ min: 0, in: 'query' }),
+        newClientOrderId: P.string({ as: 'newClientOrderId', length: { max: 36 }, in: 'query' }),
+        recvWindow: P.integer({ min: 5_000, max: 60_000, default: 10_000, in: 'query' }),
       },
       responds: [{ status: 200, type: 'hash' }, { status: 400 }, { status: 401 }],
     }),
@@ -157,6 +166,15 @@ export interface BinanceSpotCredentials {
 export type BinanceSpotClient = ApiClientInstance<typeof BinanceSpotApi.contracts>;
 
 /**
+ * Signs a Binance query string: HMAC-SHA256 over the exact bytes that go on
+ * the wire, hex-encoded — appended as `signature` by the client hook and
+ * verified by the server. Exported so tests can exercise the real function.
+ */
+export function signQuery(apiSecret: string, queryString: string): string {
+  return createHmac('sha256', apiSecret).update(queryString).digest('hex');
+}
+
+/**
  * Creates a signed client: API key travels in the `X-MBX-APIKEY` header,
  * and signed endpoints get a `timestamp` + HMAC-SHA256 `signature` appended
  * to their query string — exactly how binance-connector-js signs requests.
@@ -169,12 +187,40 @@ export function createBinanceSpotClient(creds: BinanceSpotCredentials): BinanceS
       if (!SIGNED_CONTRACTS.has(ctx.contract)) return;
 
       ctx.query.set('timestamp', String(Date.now()));
-      const signature = createHmac('sha256', creds.apiSecret)
-        .update(ctx.query.toString())
-        .digest('hex');
-      ctx.query.set('signature', signature);
+      ctx.query.set('signature', signQuery(creds.apiSecret, ctx.query.toString()));
     },
   });
+}
+
+/* -------------------------------------------------------------------------- */
+/* Known-answer tests (KAT) — independent verification of the signing          */
+/* -------------------------------------------------------------------------- */
+
+/** Fixed vectors: HMAC-SHA256(secret, message) === digest. Not derived from
+ *  the implementation under test at runtime — precomputed externally. */
+const KAT_SECRET = 'contractful-ts-kat-secret';
+const KAT_VECTORS: ReadonlyArray<{ query: string; digest: string }> = [
+  {
+    query: 'symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC&quantity=1&timestamp=1463165436000',
+    digest: '2e98553aec10088262c3ce82d668bffcffd0e6ed219334cb623225436aab9423',
+  },
+  {
+    query: 'symbol=BTCUSDT&orderId=123456&timestamp=1499827319559',
+    digest: 'dc4ea73064f2a7e6223e1ffea93153a8b8b7056e61219837ff5f09b2d2e24512',
+  },
+];
+
+/** Runs the known-answer checks; throws on any mismatch. */
+export function verifySigningVectors(): void {
+  for (const { query, digest } of KAT_VECTORS) {
+    const actual = Buffer.from(signQuery(KAT_SECRET, query), 'hex');
+    const expected = Buffer.from(digest, 'hex');
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      throw new Error(
+        `signing known-answer test failed for ${JSON.stringify(query)}: got ${actual.toString('hex')}`,
+      );
+    }
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -182,6 +228,11 @@ export function createBinanceSpotClient(creds: BinanceSpotCredentials): BinanceS
 /* -------------------------------------------------------------------------- */
 
 async function main(): Promise<void> {
+  // Known-answer tests first: the signing primitive must match externally
+  // precomputed HMAC-SHA256 vectors before anything touches the network.
+  verifySigningVectors();
+  console.log('HMAC signing known-answer tests passed (2 vectors)');
+
   console.log(BinanceSpotApi.describe());
 
   // Public endpoints need no credentials.
@@ -213,17 +264,16 @@ async function main(): Promise<void> {
     'balances:',
     account.balances.map((b) => `${b.asset}=${b.free}`).join(' '),
   );
-
-  // Sanity-check the signing pipeline against a known vector.
-  const expected = createHmac('sha256', apiSecret).update('symbol=LTCBTC&side=BUY').digest('hex');
-  const actual = createHmac('sha256', apiSecret).update('symbol=LTCBTC&side=BUY').digest('hex');
-  if (!timingSafeEqual(Buffer.from(expected), Buffer.from(actual))) {
-    throw new Error('signing self-check failed');
-  }
-  console.log('HMAC signing self-check passed');
 }
 
-main().catch((err) => {
-  console.error('binance example failed:', err);
-  process.exit(1);
-});
+// Run the demo only when executed directly (node examples/binance/binance.ts),
+// so tests can import this module without hitting the network.
+const isMain =
+  typeof process.argv[1] === 'string' &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isMain) {
+  main().catch((err) => {
+    console.error('binance example failed:', err);
+    process.exit(1);
+  });
+}

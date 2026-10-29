@@ -27,6 +27,7 @@ export const DEFAULT_RETRY_OPTIONS: ResolvedRetryOptions = {
   maxDelay: 5_000,
   jitter: 'full',
   retryAfterCapMs: 30_000,
+  retryUnsafeMethods: false,
 };
 
 /** True when the error class warrants another attempt. */

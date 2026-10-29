@@ -13,6 +13,7 @@ export const ordersApi = defineApi({
         productId: P.string({ required: true, in: "body", length: { min: 1 } }),
         quantity: P.integer({ required: true, in: "body", min: 1, max: 99 }),
       },
+      bodyRequired: true,
       responds: [{ status: 201, type: "hash" }, { status: 422 }],
       security: ["OAuth2", "orders:write"],
     }),

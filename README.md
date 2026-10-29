@@ -23,7 +23,7 @@ The core idea survives the port unchanged: **closed request schemas** reject bad
 ## Install
 
 ```bash
-npm install contractful-ts   # Node 18+, axios (peer); `ws` is an optional peer for Node < 22
+npm install contractful-ts   # Node 18+; axios ships as a dependency, `ws` is an optional peer for Node < 22
 ```
 
 ## Quick start
@@ -68,7 +68,7 @@ That's the whole client. There is no imperative request code to write or maintai
 
 ### What you get for free
 
-- **Typed methods** — argument objects and return types are inferred from the declarations (`contract<User[]>('GET /users', …)` pins the result type).
+- **Typed methods** — argument objects and return types are inferred from the declarations (`returns<User[]>(...)` pins the result type without loosening argument inference).
 - **Closed request schemas** — undeclared parameters (typos!), constraint violations (`per_page: 999` against `max: 100`) and malformed routes are rejected **before any HTTP traffic** with a `ContractViolationError` listing every problem.
 - **Parameter placement** — path params are substituted and URI-escaped, query params serialize (including repeated keys for arrays), POST/PUT/PATCH params become a JSON body, `in: 'header'` params become headers. `as: 'wire_name'` handles snake_case APIs.
 - **Response contracts** — declared statuses are checked (undeclared statuses throw `HttpStatusError` with the parsed body attached), optional top-level `type` checks catch shape drift, and unknown response fields pass through untouched.
@@ -112,6 +112,24 @@ params: {
 - `null`/`undefined` mean "not provided" (Ruby nil semantics).
 - Undeclared keys — including unknown `_meta` keys — are violations. Known meta keys: `_headers`, `_query`, `_timeout`, `_retries`, `_retryDelay`, `_idempotencyKey`, `_skipAuth`, `_signal`, `_baseUrl`.
 
+**Raw and form-encoded bodies.** By default, body params become keys of a JSON object. Two contract options cover the rest:
+
+```ts
+// `raw: true` — the param IS the payload (scalar / array / free-form bodies):
+echo: contract('POST /echo', {
+  params: { body: P.string({ required: true, in: 'body', raw: true }) },
+}),            // sends "hello" — not { "body": "hello" }
+
+// `form: true` — body params serialize as application/x-www-form-urlencoded
+// (Swagger 2.0 formData, HTML form APIs). Multipart uploads are not supported.
+login: contract('POST /session', { form: true, params: { email: P.string({ required: true }) } }),
+
+// `bodyRequired: true` — send a (possibly empty) body even when every
+// body param is optional; generated for specs with `requestBody.required`.
+```
+
+Both are emitted automatically by `contractful-gen` when the source spec calls for them.
+
 ## Responses (open world)
 
 ```ts
@@ -125,6 +143,17 @@ responds: [
 ```
 
 Unknown response *fields* are never rejected — they are data. Omit `responds` entirely and any 2xx passes.
+
+**Pinning the return type.** `contract<User[]>(...)` still works, but an explicit leading type argument makes TypeScript skip inference for the remaining generics, so argument types widen. Pin through `responds` instead and both stay strict:
+
+```ts
+import { returns } from 'contractful-ts';
+
+listUsers: contract('GET /users', {
+  params: { perPage: P.integer({ required: true }) },   // stays strictly inferred
+  responds: returns<User[]>([{ status: 200, type: 'array' }]),   // pins the result type
+}),
+```
 
 ## Authentication
 
@@ -230,6 +259,23 @@ defineApi({
   ...
 })
 ```
+
+### Retry safety (method-aware by default)
+
+A timeout, a dropped connection or a 5xx is an **ambiguous failure**: the server may or may not have applied the side effect. Replaying a non-idempotent request after one can duplicate an order, a payment or a write — so retry eligibility is explicit:
+
+| Retry after ambiguous failure? | |
+| --- | --- |
+| `GET` `HEAD` `OPTIONS` `PUT` `DELETE` | ✅ retried — idempotent by definition (RFC 9110) |
+| `POST` / `PATCH` | ❌ surfaced to the caller after a single attempt, unless… |
+| …the contract declares `idempotent` | ✅ retried, with the **same** `Idempotency-Key` on every attempt |
+| …the call passes `_idempotencyKey` | ✅ retried, stamped as the key |
+| …the contract sets `retry: 'always'` | ✅ explicit per-contract opt-in |
+| …the API sets `retry.retryUnsafeMethods: true` | ✅ API-wide opt-in |
+| `HTTP 429` (server-sanctioned) | ✅ retried for every method — the request was rejected before processing; `retry: 'never'` opts out |
+| any contract with `retry: 'never'` | ❌ no retries at all |
+
+The idempotency key is generated once per dispatch and kept stable across attempts — that stability is precisely what lets an idempotency-aware server de-duplicate the replay. The single 401→refresh→retry (auth) path is method-agnostic by design: a 401 means the request was rejected unauthenticated, not processed.
 
 - Retries cover network errors, timeouts, 408/425/429/5xx — never 4xx validation errors. Backoff is exponential with jitter, and `Retry-After` (seconds or HTTP-date) is honored, capped at `retryAfterCapMs`.
 - The circuit breaker is per-host: consecutive transport failures open it (fail fast with `CircuitOpenError`), a half-open probe after the cooldown decides recovery. Answered 4xx never trip it.
@@ -495,6 +541,28 @@ What the generator maps automatically:
 | response schema type             | `responds: [{ status, type }]`                |
 | first tag                        | output file / `defineApi` const               |
 
+### OpenAPI schema support matrix
+
+What the generator translates, what it translates with a warning, and what it rejects:
+
+| Construct                            | Behavior                                                                                                    |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| path-level `parameters`              | inherited by every operation; operation-level entries override on `(name, in)`                              |
+| `requestBody.required`               | preserved — `bodyRequired: true` guarantees a body when every property is optional                          |
+| scalar / array / free-form bodies    | `raw: true` body param — the payload serializes as itself, never `{ body: value }`                          |
+| `application/x-www-form-urlencoded`  | `form: true` (also Swagger 2.0 `formData`)                                                                  |
+| `allOf`                              | merged — properties and `required` union, numeric bounds intersect (tightest wins)                          |
+| recursive `$ref` cycles              | cycle cut at the first repeat; the affected param emits as a free-form `P.hash()` with a `// NOTE:` warning   |
+| `oneOf` / `anyOf`                    | accepted as any value (`P.custom(() => true)`) with a warning — no discriminated-union inference             |
+| `nullable: true`                     | warning — the runtime treats `null` as "not provided"                                                       |
+| `multipart/form-data` bodies         | warning — body properties are emitted but multipart encoding is not performed                               |
+| Swagger 2.0 `type: file`             | warning — emitted as a string placeholder; multipart upload is out of scope                                  |
+| external `$ref` / YAML anchors       | rejected with a clear error — inline them or convert the spec to JSON first                                  |
+
+Every warning is surfaced twice: as a `// NOTE:` comment on the affected contract and in the generated file header, so unsupported constructs are never silently dropped.
+
+**SSE is not implemented.** `AuthContext.transport` reserves an `'sse'` value for future use, but there is no SSE client runtime in this package — streaming HTTP today means the WebSocket events runtime or GraphQL subscriptions over `graphql-transport-ws`. Do not rely on the `sse` transport hint.
+
 CLI options:
 
 ```
@@ -559,7 +627,7 @@ for (const file of bundle.files) console.log(file.path, file.content.length);
 
 - [`examples/ticket-demo/`](examples/ticket-demo/) — **end-to-end**: REST + WebSocket sharing one ticket authority (token manager → one-time WS tickets → 401/4001 recovery → REST catch-up), fully deterministic against an in-process mock server; covered by `tests/ticket-demo.test.ts`
 - [`examples/github/github.ts`](examples/github/github.ts) — public API, cursor pagination, closed-schema demos
-- [`examples/binance/binance.ts`](examples/binance/binance.ts) — Binance-style spot connector: HMAC-SHA256 request signing via `beforeRequest`, `X-MBX-APIKEY`, rate limiting, idempotent order placement (run: `node examples/binance/binance.ts`)
+- [`examples/binance/binance.ts`](examples/binance/binance.ts) — Binance-style spot connector: HMAC-SHA256 request signing via `beforeRequest` with known-answer test vectors, `X-MBX-APIKEY`, rate limiting, query-string signed POST orders and no auto-retry on ambiguous order failures (run: `node examples/binance/binance.ts`)
 - [`examples/openapi/petstore.yaml`](examples/openapi/petstore.yaml) + `examples/openapi/generated/` — spec and generated connector
 - [`examples/multi-format/`](examples/multi-format/) — OpenAPI + AsyncAPI + Postman + GraphQL in one `codegen.json` run, with strict-tsc-checked generated output
 
@@ -575,7 +643,9 @@ src/
   middleware/   auth resolvers, retry policy, circuit breaker, rate limiter
   codegen/      format detection, canonical model, OpenAPI/AsyncAPI/Postman/
                 GraphQL adapters, TS emitters (runtime + standalone), CLI
-tests/          vitest suite (315 tests — unit + round-trips + the e2e ticket demo)
+tests/          vitest suite (355 tests — unit + round-trips + retry-safety, OpenAPI
+                wire-format and signing regressions + the e2e ticket demo);
+                tests/types/ additionally strict-tsc-checked (compile-time contracts)
 examples/       end-to-end ticket demo, GitHub + Binance-style connectors,
                 OpenAPI + multi-format fixtures
 ```
@@ -584,11 +654,12 @@ examples/       end-to-end ticket demo, GitHub + Binance-style connectors,
 
 ```bash
 npm install
-npm run build    # tsc -> dist/
-npm test         # build + vitest run
+npm run build       # tsc -> dist/
+npm run typecheck   # strict tsc over src + the compile-time test contracts
+npm test            # build + vitest run
 ```
 
-The test suite covers validation, path building, response classification, retry/backoff math, circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, the events runtime against a scripted fake socket (reconnects, heartbeats, auth modes, routing), the graphql-transport-ws protocol, every format adapter, multi-source configs, codegen round-trips that import generated files and run them — including strict `tsc` checks of generated output — and an end-to-end ticket-authentication demo (`examples/ticket-demo/`) that runs the full REST + WS lifecycle against an in-process mock server.
+The test suite covers validation, path building, response classification, retry/backoff math, method-aware retry safety (non-idempotent requests are never auto-replayed; idempotency keys stay stable across attempts), circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, the events runtime against a scripted fake socket (reconnects, heartbeats, auth modes, routing), the graphql-transport-ws protocol, every format adapter, multi-source configs, codegen round-trips that import generated files and run them — including strict `tsc` checks of generated output — OpenAPI wire-format regressions (parameter inheritance, formData, required bodies, raw scalar/array bodies, recursive refs, combinators), the Binance signing example against known-answer vectors, and an end-to-end ticket-authentication demo (`examples/ticket-demo/`) that runs the full REST + WS lifecycle against an in-process mock server.
 
 ## License
 

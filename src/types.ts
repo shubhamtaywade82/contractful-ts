@@ -22,6 +22,27 @@ export const HTTP_METHODS: readonly HttpMethod[] = [
 export const BODY_METHODS: readonly HttpMethod[] = ['POST', 'PUT', 'PATCH'];
 
 /**
+ * Methods that are safe to retry by definition (RFC 9110 §9.2.2):
+ * GET / HEAD / OPTIONS carry no request semantics, and PUT / DELETE are
+ * idempotent — repeating them after an ambiguous failure (timeout, dropped
+ * connection, 5xx) cannot change the outcome beyond the first attempt.
+ * POST and PATCH are NOT in this list: an ambiguous failure may mean the
+ * server already applied the side effect, so they are never auto-retried
+ * unless the contract opts in (`idempotent`, `retry: 'always'`, an explicit
+ * `_idempotencyKey`, or API-level `retry.retryUnsafeMethods`).
+ */
+export const IDEMPOTENT_METHODS: readonly HttpMethod[] = [
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'PUT',
+  'DELETE',
+];
+
+/** Per-contract retry eligibility. */
+export type ContractRetryMode = 'auto' | 'always' | 'never';
+
+/**
  * Per-call meta options. Mirroring contractful, they are mixed into the
  * args object and prefixed with an underscore so they can never collide
  * with a declared parameter.
@@ -106,6 +127,14 @@ export interface RetryOptions {
   retryOn?: (err: unknown) => boolean;
   /** Upper bound applied to a server `Retry-After`. Default `30_000`. */
   retryAfterCapMs?: number;
+  /**
+   * Retry non-idempotent methods (POST / PATCH) after ambiguous failures
+   * (network errors, timeouts, 5xx) instead of surfacing the error.
+   * Default `false` — duplicate writes are worse than a visible failure.
+   * A server-sanctioned `429 Retry-After` is honored for every method
+   * regardless of this flag; set per-contract `retry: 'never'` to opt out.
+   */
+  retryUnsafeMethods?: boolean;
 }
 
 export interface CircuitOptions {

@@ -117,18 +117,33 @@ export function parseSpecText(text: string, origin = 'spec'): OpenApiSpec {
 
 const MAX_REF_DEPTH = 64;
 
-/**
- * Deeply dereferences local `$ref` pointers (`#/components/schemas/Foo`).
- * Cycles are broken by leaving a `{}` placeholder.
- */
-export function dereference<T>(node: T, spec: OpenApiSpec): T {
-  return dereferenceNode(node as Json, spec, 0, new Set<string>()) as T;
+/** Optional warning sink used while translating a spec into the IR. */
+export interface SchemaWarnCtx {
+  warn(message: string): void;
 }
 
-function dereferenceNode(node: Json, spec: OpenApiSpec, depth: number, seen: Set<string>): Json {
-  if (depth > MAX_REF_DEPTH) return {};
+/**
+ * Deeply dereferences local `$ref` pointers (`#/components/schemas/Foo`).
+ * Cycles are broken by substituting a free-form object placeholder (typed as
+ * `P.hash()` — never a silently-wrong scalar) and recording a warning.
+ */
+export function dereference<T>(node: T, spec: OpenApiSpec, warnings?: string[]): T {
+  return dereferenceNode(node as Json, spec, 0, new Set<string>(), warnings) as T;
+}
+
+function dereferenceNode(
+  node: Json,
+  spec: OpenApiSpec,
+  depth: number,
+  seen: Set<string>,
+  warnings?: string[],
+): Json {
+  if (depth > MAX_REF_DEPTH) {
+    warnings?.push(`$ref nesting deeper than ${MAX_REF_DEPTH} — emitted as a free-form object`);
+    return { type: 'object', description: 'deeply nested schema — free-form' };
+  }
   if (Array.isArray(node)) {
-    return node.map((item) => dereferenceNode(item, spec, depth + 1, seen));
+    return node.map((item) => dereferenceNode(item, spec, depth + 1, seen, warnings));
   }
   if (typeof node !== 'object' || node === null) return node;
 
@@ -139,14 +154,19 @@ function dereferenceNode(node: Json, spec: OpenApiSpec, depth: number, seen: Set
         `External $ref ${JSON.stringify(ref)} is not supported — inline it or convert the spec to a single file.`,
       );
     }
-    if (seen.has(ref)) return {};
+    if (seen.has(ref)) {
+      warnings?.push(
+        `recursive $ref ${ref} — the cycle is cut and the affected parameter is emitted as a free-form object`,
+      );
+      return { type: 'object', description: `recursive schema (${ref}) — free-form` };
+    }
     const target = resolvePointer(ref, spec);
-    return dereferenceNode(target, spec, depth + 1, new Set([...seen, ref]));
+    return dereferenceNode(target, spec, depth + 1, new Set([...seen, ref]), warnings);
   }
 
   const out: JsonRecord = {};
   for (const [key, value] of Object.entries(node)) {
-    out[key] = dereferenceNode(value, spec, depth + 1, seen);
+    out[key] = dereferenceNode(value, spec, depth + 1, seen, warnings);
   }
   return out;
 }
@@ -185,6 +205,10 @@ export interface SchemaIR {
   description?: string;
   properties?: Record<string, SchemaIR>;
   requiredProps?: string[];
+  /** `oneOf` / `anyOf` / conflicting `allOf` types — any value accepted. */
+  untyped?: boolean;
+  /** `nullable: true` — the runtime treats null as "not provided". */
+  nullable?: boolean;
 }
 
 export type ParamLocationIR = 'path' | 'query' | 'header' | 'body';
@@ -195,6 +219,8 @@ export interface ParamIR {
   location: ParamLocationIR;
   schema: SchemaIR;
   required: boolean;
+  /** The parameter IS the entire request body (scalar / array / free-form). */
+  raw?: boolean;
   description?: string;
 }
 
@@ -214,6 +240,12 @@ export interface OperationIR {
   responds: ResponseIR[];
   /** Security requirement names / OAuth scopes, forwarded to the auth provider. */
   security?: string[];
+  /** Body parameters are sent as `application/x-www-form-urlencoded`. */
+  form?: boolean;
+  /** A (possibly empty) body must be sent even when all body params are optional. */
+  bodyRequired?: boolean;
+  /** Translation warnings surfaced as `// NOTE:` comments above the contract. */
+  warnings?: string[];
 }
 
 /** A security scheme from `components.securitySchemes` (3.x) / `securityDefinitions` (2.0). */
@@ -267,6 +299,7 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
   const isV2 = spec.swagger?.startsWith('2') ?? false;
   const title = (spec.info?.title ?? 'Api').trim() || 'Api';
   const version = spec.info?.version;
+  const warnings: string[] = [];
 
   let base = options.base;
   if (!base) {
@@ -281,7 +314,7 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
   }
   base = base.replace(/\/+$/, '');
 
-  const paths = dereference(spec.paths ?? {}, spec) as JsonRecord;
+  const paths = dereference(spec.paths ?? {}, spec, warnings) as JsonRecord;
   const groupBy = options.groupBy ?? 'tag';
   const securitySchemes = securitySchemesFrom(spec, isV2);
   const knownSchemes = new Set((securitySchemes ?? []).map((s) => s.name));
@@ -296,7 +329,16 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
       const rawOp = pathItem[verb];
       if (typeof rawOp !== 'object' || rawOp === null) continue;
       const op = rawOp as JsonRecord;
-      const operation = buildOperation(verb.toUpperCase(), rawPath, pathItem, op, isV2, globalSecurity, knownSchemes);
+      const operation = buildOperation(
+        verb.toUpperCase(),
+        rawPath,
+        pathItem,
+        op,
+        isV2,
+        globalSecurity,
+        knownSchemes,
+        warnings,
+      );
       if (!operation) continue;
 
       const groupName = pickGroup(operation, pathItem, op, groupBy);
@@ -307,12 +349,14 @@ export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): Api
     }
   }
 
+  const uniqueWarnings = [...new Set(warnings)];
   return {
     title,
     version,
     base,
     groups: [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)),
     securitySchemes,
+    notes: uniqueWarnings.length > 0 ? uniqueWarnings : undefined,
   };
 }
 
@@ -399,6 +443,33 @@ function pickGroup(op: OperationIR, pathItem: JsonRecord, opRecord: JsonRecord, 
   return sanitizeGroup(tag ?? 'default');
 }
 
+/**
+ * Merges path-level parameters with operation-level ones. Per the OpenAPI
+ * spec, path items' `parameters` are inherited by every operation; an
+ * operation-level entry with the same `name` + `in` OVERRIDES the inherited
+ * one, and everything else is kept.
+ */
+function mergeParameters(pathLevel: unknown, opLevel: unknown): Json[] {
+  const pathParams = Array.isArray(pathLevel) ? (pathLevel as Json[]) : [];
+  const opParams = Array.isArray(opLevel) ? (opLevel as Json[]) : [];
+  if (pathParams.length === 0) return opParams;
+  if (opParams.length === 0) return pathParams;
+
+  const keyOf = (p: Json): string | null => {
+    if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+    const rec = p as JsonRecord;
+    return typeof rec.name === 'string' && typeof rec.in === 'string'
+      ? `${rec.in}:${rec.name}`
+      : null;
+  };
+  const opKeys = new Set(opParams.map(keyOf).filter((k): k is string => k !== null));
+  const inherited = pathParams.filter((p) => {
+    const key = keyOf(p);
+    return key === null || !opKeys.has(key);
+  });
+  return [...inherited, ...opParams];
+}
+
 function buildOperation(
   method: string,
   rawPath: string,
@@ -407,6 +478,7 @@ function buildOperation(
   isV2: boolean,
   globalSecurity: unknown,
   knownSchemes: Set<string>,
+  apiWarnings: string[],
 ): OperationIR | null {
   // Route: {param} → :param
   const path = rawPath.replace(/\{([^}]+)\}/g, (_m, name: string) => `:${name}`);
@@ -415,13 +487,19 @@ function buildOperation(
   const operationId = typeof op.operationId === 'string' ? op.operationId : null;
   const name = operationId ?? methodNameFromPath(method, path);
 
-  // Params
+  // Params — path-level entries are inherited unless overridden (name + in).
   const params: ParamIR[] = [];
-  const rawParams = Array.isArray(op.parameters)
-    ? op.parameters
-    : Array.isArray(pathItem.parameters)
-      ? pathItem.parameters
-      : [];
+  const rawParams = mergeParameters(pathItem.parameters, op.parameters);
+  const opWarnings: string[] = [];
+  const schemaCtx: SchemaWarnCtx = {
+    warn: (message) => {
+      const line = `${name}: ${message}`;
+      opWarnings.push(line);
+      apiWarnings.push(line);
+    },
+  };
+  let formBody = false;
+  let bodyRequired = false;
 
   const pathParamNames = [...rawPath.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
 
@@ -435,7 +513,7 @@ function buildOperation(
 
     if (in_ === 'body') {
       // Swagger 2.0 body: a single (usually object) schema.
-      const schema = schemaFrom(p.schema as JsonRecord | undefined);
+      const schema = schemaFrom(p.schema as JsonRecord | undefined, schemaCtx);
       if (schema.properties && Object.keys(schema.properties).length > 0) {
         const requiredProps = new Set(schema.requiredProps ?? []);
         for (const [propName, propSchema] of Object.entries(schema.properties)) {
@@ -447,26 +525,54 @@ function buildOperation(
             required: requiredProps.has(propName),
           });
         }
+        // A required body must be sent even if every property is optional.
+        if (required) bodyRequired = true;
       } else {
+        // Scalar / array / free-form body: the param IS the payload.
         params.push({
           tsName: 'body',
           wireName: 'body',
           location: 'body',
           schema,
           required,
+          raw: true,
         });
       }
       continue;
     }
 
+    if (in_ === 'formData') {
+      // Swagger 2.0 formData: values travel in the request body as
+      // application/x-www-form-urlencoded — body placement + `form: true`,
+      // never query parameters.
+      formBody = true;
+      const fs = schemaFrom(p as JsonRecord, schemaCtx);
+      if (fs.type === 'file') {
+        schemaCtx.warn(
+          `formData parameter "${wireName}" is a file upload — multipart/form-data is not supported; it is emitted as a string placeholder`,
+        );
+        fs.type = 'string';
+        fs.format = 'binary';
+      }
+      params.push({
+        tsName: toCamelCase(wireName),
+        wireName,
+        location: 'body',
+        schema: fs,
+        required,
+        description: typeof p.description === 'string' ? p.description : undefined,
+      });
+      continue;
+    }
+
     const location: ParamLocationIR =
-      in_ === 'path' ? 'path' : in_ === 'header' ? 'header' : 'query'; // formData → query
+      in_ === 'path' ? 'path' : in_ === 'header' ? 'header' : 'query';
     params.push({
       tsName: toCamelCase(wireName),
       wireName,
       location,
       // OpenAPI 3 keeps the schema under `schema`; Swagger 2.0 inlines it.
-      schema: schemaFrom((p.schema ?? p) as JsonRecord),
+      schema: schemaFrom((p.schema ?? p) as JsonRecord, schemaCtx),
       required,
       description: typeof p.description === 'string' ? p.description : undefined,
     });
@@ -476,12 +582,41 @@ function buildOperation(
   if (!isV2 && op.requestBody && typeof op.requestBody === 'object') {
     const body = op.requestBody as JsonRecord;
     const required = body.required === true;
-    const jsonContent =
-      body.content && typeof body.content === 'object'
-        ? ((body.content as JsonRecord)['application/json'] as JsonRecord | undefined) ??
-          firstEntry(body.content as JsonRecord)
-        : undefined;
-    const schema = schemaFrom(jsonContent?.schema as JsonRecord | undefined);
+    const content = body.content && typeof body.content === 'object'
+      ? (body.content as JsonRecord)
+      : undefined;
+    // Prefer application/json, then urlencoded, then any other media type.
+    let mediaType: string | undefined;
+    let jsonContent: JsonRecord | undefined;
+    if (content) {
+      if (content['application/json'] && typeof content['application/json'] === 'object') {
+        mediaType = 'application/json';
+        jsonContent = content['application/json'] as JsonRecord;
+      } else if (
+        content['application/x-www-form-urlencoded'] &&
+        typeof content['application/x-www-form-urlencoded'] === 'object'
+      ) {
+        mediaType = 'application/x-www-form-urlencoded';
+        jsonContent = content['application/x-www-form-urlencoded'] as JsonRecord;
+      } else {
+        const entry = firstEntry(content);
+        if (entry) {
+          mediaType = Object.keys(content).find(
+            (k) => content[k] === entry,
+          );
+          jsonContent = entry;
+        }
+      }
+    }
+    if (mediaType === 'application/x-www-form-urlencoded') {
+      formBody = true;
+    }
+    if (mediaType?.startsWith('multipart/')) {
+      schemaCtx.warn(
+        `requestBody media type ${mediaType} (multipart) is not supported — body properties are emitted, but multipart encoding is not`,
+      );
+    }
+    const schema = schemaFrom(jsonContent?.schema as JsonRecord | undefined, schemaCtx);
     if (schema.properties && Object.keys(schema.properties).length > 0) {
       const requiredProps = new Set(schema.requiredProps ?? []);
       for (const [propName, propSchema] of Object.entries(schema.properties)) {
@@ -490,11 +625,14 @@ function buildOperation(
           wireName: propName,
           location: 'body',
           schema: propSchema,
-          required: requiredProps.has(propName) || (pathParamNames.includes(propName) && false),
+          required: requiredProps.has(propName),
         });
       }
+      // A required body must be sent even if every property is optional.
+      if (required) bodyRequired = true;
     } else {
-      params.push({ tsName: 'body', wireName: 'body', location: 'body', schema, required });
+      // Scalar / array / free-form body: the param IS the payload.
+      params.push({ tsName: 'body', wireName: 'body', location: 'body', schema, required, raw: true });
     }
   }
 
@@ -528,6 +666,7 @@ function buildOperation(
       (content?.schema ?? (isV2 ? (resp.schema as JsonRecord | undefined) : undefined)) as
         | JsonRecord
         | undefined,
+      schemaCtx,
     );
     if (schema.type === 'array') type = 'array';
     else if (schema.type === 'object') type = 'hash';
@@ -544,7 +683,20 @@ function buildOperation(
     : [];
   const security = securityFromOperation(op, globalSecurity, knownSchemes);
 
-  return { name, method, path, description, summary, tags, params, responds, security };
+  return {
+    name,
+    method,
+    path,
+    description,
+    summary,
+    tags,
+    params,
+    responds,
+    security,
+    form: formBody || undefined,
+    bodyRequired: bodyRequired || undefined,
+    warnings: opWarnings.length > 0 ? opWarnings : undefined,
+  };
 }
 
 function firstEntry(record: JsonRecord): JsonRecord | undefined {
@@ -554,9 +706,33 @@ function firstEntry(record: JsonRecord): JsonRecord | undefined {
   return undefined;
 }
 
-export function schemaFrom(raw: JsonRecord | undefined): SchemaIR {
+export function schemaFrom(raw: JsonRecord | undefined, ctx?: SchemaWarnCtx): SchemaIR {
   if (!raw || typeof raw !== 'object') return {};
   const out: SchemaIR = {};
+
+  // allOf: merge every member schema — properties and required lists union,
+  // numeric bounds intersect (the tighter side wins).
+  if (Array.isArray(raw.allOf) && raw.allOf.length > 0) {
+    const members = raw.allOf
+      .filter((m): m is JsonRecord => !!m && typeof m === 'object' && !Array.isArray(m))
+      .map((m) => schemaFrom(m, ctx));
+    for (const member of members) {
+      Object.assign(out, mergeSchemaIR(out, member));
+    }
+  }
+
+  if (Array.isArray(raw.oneOf) || Array.isArray(raw.anyOf)) {
+    const combinator = Array.isArray(raw.oneOf) ? 'oneOf' : 'anyOf';
+    ctx?.warn(
+      `schema uses ${combinator} — the generated parameter accepts any value (discriminated unions are not inferred)`,
+    );
+    out.untyped = true;
+  }
+  if (raw.nullable === true) {
+    out.nullable = true;
+    ctx?.warn('schema is nullable — the runtime treats null as "not provided"');
+  }
+
   if (typeof raw.type === 'string') out.type = raw.type;
   if (typeof raw.format === 'string') out.format = raw.format;
   if (Array.isArray(raw.enum)) out.enumValues = raw.enum;
@@ -568,16 +744,55 @@ export function schemaFrom(raw: JsonRecord | undefined): SchemaIR {
   if (typeof raw.pattern === 'string') out.pattern = raw.pattern;
   if (typeof raw.description === 'string') out.description = raw.description;
   if (raw.items && typeof raw.items === 'object') {
-    out.items = schemaFrom(raw.items as JsonRecord);
+    out.items = schemaFrom(raw.items as JsonRecord, ctx);
   }
   if (raw.properties && typeof raw.properties === 'object') {
     out.properties = {};
     for (const [k, v] of Object.entries(raw.properties as JsonRecord)) {
-      out.properties[k] = schemaFrom(v as JsonRecord);
+      out.properties[k] = schemaFrom(v as JsonRecord, ctx);
     }
   }
   if (Array.isArray(raw.required)) {
-    out.requiredProps = raw.required.filter((r): r is string => typeof r === 'string');
+    const own = raw.required.filter((r): r is string => typeof r === 'string');
+    out.requiredProps = out.requiredProps ? [...new Set([...out.requiredProps, ...own])] : own;
+  }
+  return out;
+}
+
+/** Merges two schemas the way `allOf` intends: union of structure, intersection of bounds. */
+function mergeSchemaIR(base: SchemaIR, overlay: SchemaIR): SchemaIR {
+  if (Object.keys(base).length === 0) return { ...overlay };
+  if (Object.keys(overlay).length === 0) return { ...base };
+  const out: SchemaIR = { ...base };
+
+  if (overlay.type !== undefined) {
+    if (out.type !== undefined && out.type !== overlay.type) {
+      out.type = undefined;
+      out.untyped = true;
+    } else {
+      out.type = overlay.type;
+    }
+  }
+  if (overlay.format !== undefined) out.format = overlay.format;
+  if (overlay.pattern !== undefined) out.pattern = overlay.pattern;
+  if (overlay.description !== undefined) out.description = overlay.description;
+  if (overlay.default !== undefined) out.default = overlay.default;
+  if (overlay.enumValues !== undefined) out.enumValues = overlay.enumValues;
+  if (overlay.minimum !== undefined) out.minimum = Math.max(out.minimum ?? -Infinity, overlay.minimum);
+  if (overlay.maximum !== undefined) out.maximum = Math.min(out.maximum ?? Infinity, overlay.maximum);
+  if (overlay.minLength !== undefined) out.minLength = Math.max(out.minLength ?? 0, overlay.minLength);
+  if (overlay.maxLength !== undefined) out.maxLength = Math.min(out.maxLength ?? Infinity, overlay.maxLength);
+  if (overlay.untyped) out.untyped = true;
+  if (overlay.nullable) out.nullable = true;
+
+  if (overlay.properties) {
+    out.properties = { ...(out.properties ?? {}), ...overlay.properties };
+  }
+  if (overlay.requiredProps) {
+    out.requiredProps = [...new Set([...(out.requiredProps ?? []), ...overlay.requiredProps])];
+  }
+  if (overlay.items) {
+    out.items = out.items ? mergeSchemaIR(out.items, overlay.items) : overlay.items;
   }
   return out;
 }

@@ -2,3 +2,10 @@
 export * from './pet.js';
 export * from './store.js';
 export * from './user.js';
+
+export const CLIENT_METADATA = {
+  generator: 'contractful-ts',
+  generatorVersion: "0.4.0",
+  api: "Swagger Petstore - OpenAPI 3.0",
+  sources: [{ file: "examples/openapi/petstore.yaml", hash: "sha256:7e775044c7a1e4d11b9b6d7a41e3d3a4942b243d10f5231f2f154733264e7d6a" }],
+} as const;

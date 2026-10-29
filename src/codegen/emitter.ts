@@ -195,6 +195,9 @@ function emitGroupFile(
 function emitOperation(lines: string[], op: OperationIR): void {
   const doc = [op.summary, op.description].filter(Boolean).join(' — ');
   if (doc) lines.push(`    /** ${escapeComment(clamp(doc))} */`);
+  for (const warning of op.warnings ?? []) {
+    lines.push(`    // NOTE: ${escapeComment(warning)}`);
+  }
   lines.push(`    ${op.name}: contract(${JSON.stringify(`${op.method} ${op.path}`)}, {`);
 
   if (op.params.length > 0) {
@@ -203,6 +206,13 @@ function emitOperation(lines: string[], op: OperationIR): void {
       emitParam(lines, param);
     }
     lines.push('      },');
+  }
+
+  if (op.form) {
+    lines.push('      form: true,');
+  }
+  if (op.bodyRequired) {
+    lines.push('      bodyRequired: true,');
   }
 
   if (op.responds.length > 0) {
@@ -223,18 +233,25 @@ function emitOperation(lines: string[], op: OperationIR): void {
 function emitParam(lines: string[], param: ParamIR): void {
   const args: string[] = [];
   if (param.required) args.push('required: true');
-  if (param.tsName !== param.wireName) args.push(`as: ${JSON.stringify(param.wireName)}`);
+  // A raw body param replaces the whole payload — no wire name to map.
+  if (param.tsName !== param.wireName && !param.raw) args.push(`as: ${JSON.stringify(param.wireName)}`);
   // Path placement is derived from the route template; everything else is
   // stated explicitly so generated code stays unambiguous.
   if (param.location === 'query' || param.location === 'header' || param.location === 'body') {
     args.push(`in: ${JSON.stringify(param.location)}`);
   }
+  if (param.raw) args.push('raw: true');
   args.push(...schemaConstraintArgs(param.schema));
   const describe = param.schema.description ?? param.description;
   if (describe) {
     args.push(`describe: ${JSON.stringify(clamp(describe))}`);
   }
 
+  if (param.schema.untyped) {
+    // oneOf / anyOf / conflicting allOf types — accept any value and say so.
+    lines.push(`        ${param.tsName}: P.custom(() => true, ${formatArgs(args)}),`);
+    return;
+  }
   lines.push(`        ${param.tsName}: P.${emitKind(param.schema)}(${formatArgs(args)}),`);
 }
 

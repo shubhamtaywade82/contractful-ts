@@ -1,6 +1,6 @@
 {
   "name": "contractful-ts",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Contract-first HTTP and WebSocket client for TypeScript. Declare the shape of an API; get typed client methods with validation, auth, retries, circuit breakers and rate limiting. Generates clients from OpenAPI, AsyncAPI, Postman Collections and GraphQL SDL.",
   "keywords": [
     "contract-first",
@@ -54,11 +54,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tests/types/tsconfig.json --noEmit",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",
     "generate": "node dist/codegen/cli.js --config codegen.json",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
-    "prepublishOnly": "npm run build && vitest run"
+    "prepublishOnly": "npm run build && npm run typecheck && vitest run"
   },
   "dependencies": {
     "axios": "^1.7.0"

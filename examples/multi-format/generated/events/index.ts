@@ -12,7 +12,7 @@ export const EVENT_NAMES = {
 
 export const CLIENT_METADATA = {
   generator: 'contractful-ts',
-  generatorVersion: "0.3.0",
+  generatorVersion: "0.4.0",
   api: "Shop Events",
   sources: [{ file: "examples/multi-format/specs/events.yaml", hash: "sha256:377edad9d54f03dd12ff878440d8c0d17d1b8cd93423f2f57990b7734fd460b4" }],
 } as const;

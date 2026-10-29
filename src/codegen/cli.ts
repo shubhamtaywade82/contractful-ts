@@ -16,7 +16,9 @@
  */
 
 import { mkdir, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   buildApiIR,
   loadSpec,
@@ -334,7 +336,7 @@ export async function run(argv: string[] = process.argv.slice(2)): Promise<numbe
         fail(err instanceof Error ? err.message : String(err));
       });
       if (typeof spec.swagger === 'string') {
-        process.stderr.write('contractful-gen: note: Swagger 2.0 spec detected; treating formData params as query parameters.\n');
+        process.stderr.write('contractful-gen: note: Swagger 2.0 spec detected; formData parameters are emitted as form-encoded body parameters.\n');
       }
       const ir = buildApiIR(spec, { base: args.base, groupBy: args.groupBy });
       const files = emitContracts(ir, emitOptions);
@@ -456,7 +458,23 @@ function report(operations: number, files: number, groups: number, outDir: strin
   );
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file://${resolve(process.argv[1])}`).href) {
+/**
+ * Main-module guard. When installed from npm, `node_modules/.bin/contractful-gen`
+ * is a SYMLINK to this file: `process.argv[1]` then names the symlink while
+ * `import.meta.url` names the resolved real path, so a naive path comparison
+ * never matches and the binary exits 0 having done nothing. Resolve the
+ * invocation path through the filesystem before comparing.
+ */
+function invokedAsMain(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(resolve(process.argv[1]))).href;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedAsMain()) {
   run().then(
     (code) => process.exit(code),
     (err) => {

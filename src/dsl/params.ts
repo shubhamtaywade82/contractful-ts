@@ -45,6 +45,14 @@ export interface CommonParamOptions {
   in?: ParamLocation;
   /** Human-readable documentation, surfaced by `describe()`. */
   describe?: string;
+  /**
+   * Marks a `in: 'body'` parameter as the ENTIRE request body rather than a
+   * key inside it — for APIs whose request body is a raw scalar, array or
+   * free-form object (`POST /echo` expecting `"hello"` or `[1, 2]`, not
+   * `{ "body": "hello" }`). At most one raw body parameter may be declared
+   * per contract, and it cannot be combined with regular body parameters.
+   */
+  raw?: boolean;
 }
 
 export interface StringParamOptions extends CommonParamOptions {
@@ -108,6 +116,8 @@ export interface ParamSpec<T = unknown, R extends boolean = false> {
   readonly max?: number;
   readonly of?: AnyParamSpec;
   readonly check?: (value: unknown) => true | string;
+  /** Marks this body parameter as the entire request payload. */
+  readonly raw?: boolean;
   readonly __tsType?: T;
   readonly __required?: R;
 }

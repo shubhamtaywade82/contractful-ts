@@ -6,7 +6,7 @@ export * from './auth.js';
 
 export const CLIENT_METADATA = {
   generator: 'contractful-ts',
-  generatorVersion: "0.3.0",
+  generatorVersion: "0.4.0",
   api: "Shop REST API",
   sources: [{ file: "examples/multi-format/specs/rest.yaml", hash: "sha256:ca8c7f83cc9ec429030af8a96032e6a7c51780e3e12083d503d5a232522051c0" }],
 } as const;

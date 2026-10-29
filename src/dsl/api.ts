@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import {
   ContractViolationError,
   HttpStatusError,
+  RateLimitError,
   RequestAbortedError,
   TransportError,
 } from '../errors.js';
@@ -43,7 +44,9 @@ import type {
 } from './contract.js';
 import {
   BODY_METHODS,
+  IDEMPOTENT_METHODS,
   type CircuitOptions,
+  type ContractRetryMode,
   type MetaOptions,
   type RateLimitOptions,
   type RequestContext,
@@ -178,11 +181,47 @@ function serializeQueryValue(value: unknown): string {
 
 function cloneBody(body: unknown): unknown {
   if (body === undefined || body === null) return body;
+  if (body instanceof URLSearchParams) return new URLSearchParams(body.toString());
   try {
     return structuredClone(body);
   } catch {
     return body;
   }
+}
+
+/** Serializes a body object as `application/x-www-form-urlencoded` data. */
+function toFormBody(body: Record<string, unknown>): URLSearchParams {
+  const form = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    if (Array.isArray(value)) {
+      for (const item of value) form.append(key, serializeQueryValue(item));
+    } else {
+      form.set(key, serializeQueryValue(value));
+    }
+  }
+  return form;
+}
+
+/**
+ * Resolves retry eligibility for one dispatch. See `IDEMPOTENT_METHODS`:
+ * ambiguous failures (network errors, timeouts, 5xx) are only retried when
+ * repeating the request is known-safe — an idempotent method, an enforced
+ * idempotency mechanism on the contract, or an explicit opt-in.
+ */
+function isRetrySafe(
+  method: string,
+  def: ContractDefinition<any, any>,
+  meta: MetaOptions,
+  apiRetryUnsafe: boolean | undefined,
+): boolean {
+  if (def.options.retry === 'always') return true;
+  if (IDEMPOTENT_METHODS.includes(method as never)) return true;
+  // `idempotent: true | { header }` — the (stable) idempotency key is the
+  // enforced-duplication mechanism that makes a retry safe.
+  if (def.options.idempotent === true || typeof def.options.idempotent === 'object') return true;
+  // An explicitly supplied per-call key is an equally deliberate opt-in.
+  if (meta._idempotencyKey !== undefined) return true;
+  return apiRetryUnsafe === true;
 }
 
 function hostOf(url: string): string {
@@ -332,7 +371,9 @@ export function defineApi<C extends ApiContracts>(
       // 3. Parameter placement.
       const query = new URLSearchParams();
       const headers: Record<string, string> = { ...this.#headers, ...(meta._headers ?? {}) };
-      let body: Record<string, unknown> | undefined;
+      // `unknown` on purpose: the body may be a params object, a raw
+      // scalar/array payload (`raw: true`), or URLSearchParams (`form: true`).
+      let body: unknown;
 
       for (const [paramName, spec] of Object.entries(specs) as [string, AnyParamSpec][]) {
         if (paramName in consumed) continue;
@@ -351,8 +392,14 @@ export function defineApi<C extends ApiContracts>(
         if (location === 'query') {
           appendQuery(query, wireName, value);
         } else if (location === 'body') {
-          body ??= {};
-          body[wireName] = value;
+          if (spec.raw) {
+            // A raw body param IS the request payload (scalar / array /
+            // free-form bodies) — never wrapped in an object.
+            body = value;
+          } else {
+            if (typeof body !== 'object' || body === null) body = {};
+            (body as Record<string, unknown>)[wireName] = value;
+          }
         } else if (location === 'header') {
           headers[wireName] = String(value);
         }
@@ -368,11 +415,28 @@ export function defineApi<C extends ApiContracts>(
         for (const [k, v] of extra) query.set(k, v);
       }
 
-      // 4. Idempotency key.
+      // 4. Idempotency key — stamped once per dispatch (never per attempt)
+      //    so every retry of a request carries the SAME key, which is what
+      //    lets an idempotency-aware server de-duplicate the replay.
       const idem = def.options.idempotent;
-      if (idem) {
+      if (idem || meta._idempotencyKey !== undefined) {
         const header = typeof idem === 'object' ? idem.header : this.#idempotencyHeader;
         headers[header] ??= meta._idempotencyKey ?? randomUUID();
+      }
+
+      // 4b. Body encoding: `form: true` serializes body params as
+      //     application/x-www-form-urlencoded; `bodyRequired` guarantees a
+      //     (possibly empty) body for required requestBody specs whose
+      //     properties are all optional.
+      if (
+        def.options.form &&
+        body !== undefined &&
+        !(body instanceof URLSearchParams)
+      ) {
+        body = toFormBody(body as Record<string, unknown>);
+      }
+      if (body === undefined && def.options.bodyRequired) {
+        body = def.options.form ? new URLSearchParams() : {};
       }
 
       // 5. Resolve per-call knobs.
@@ -402,7 +466,22 @@ export function defineApi<C extends ApiContracts>(
       def: ContractDefinition<any, any>,
       prepared: PreparedRequest,
     ): Promise<unknown> {
-      const maxAttempts = 1 + Math.max(0, prepared.retries);
+      const retryMode: ContractRetryMode = def.options.retry ?? 'auto';
+      // P0 retry safety: a request is only retried after an AMBIGUOUS
+      // failure (network error, timeout, 5xx — the server may or may not
+      // have applied the side effect) when repeating it is known-safe.
+      // POST/PATCH therefore get a single attempt unless the contract opts
+      // in through `idempotent`, `retry: 'always'`, an explicit
+      // `_idempotencyKey`, or API-level `retry.retryUnsafeMethods`.
+      const retrySafe =
+        retryMode !== 'never' &&
+        isRetrySafe(def.route.method, def, prepared.meta, this.#retry.retryUnsafeMethods);
+      const maxAttempts = retryMode === 'never' ? 1 : retrySafe ? 1 + Math.max(0, prepared.retries) : 1;
+      // 429 + Retry-After is a server-sanctioned retry invitation: the
+      // request was rejected before processing, so it is honored for every
+      // method (still capped by the configured budget; `retry: 'never'
+      // opts out entirely).
+      const sanctionedCeiling = 1 + Math.max(0, prepared.retries);
       const retryOptions: ResolvedRetryOptions = {
         ...this.#retry,
         baseDelay: prepared.retryBaseDelay,
@@ -522,7 +601,12 @@ export function defineApi<C extends ApiContracts>(
             this.#breakers?.recordFailure(host);
           }
 
-          const mayRetry = attempt + 1 < maxAttempts && isRetryableError(err, retryOptions.retryOn);
+          // 429 (with or without Retry-After) is treated as a sanctioned
+          // retry for every method; every other retryable error needs the
+          // method-aware safety gate above.
+          const sanctioned = err instanceof RateLimitError && retryMode !== 'never';
+          const ceiling = sanctioned ? sanctionedCeiling : maxAttempts;
+          const mayRetry = attempt + 1 < ceiling && isRetryableError(err, retryOptions.retryOn);
           if (!mayRetry) {
             throw err;
           }

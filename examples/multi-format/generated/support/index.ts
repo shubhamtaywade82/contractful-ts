@@ -3,7 +3,7 @@ export * from './tickets.js';
 
 export const CLIENT_METADATA = {
   generator: 'contractful-ts',
-  generatorVersion: "0.3.0",
+  generatorVersion: "0.4.0",
   api: "Shop Support Collection",
   sources: [{ file: "examples/multi-format/specs/support.postman_collection.json", hash: "sha256:2b6fb07ba335cb814bc67d86d7da95c25214143381a5ca5110b21b5d33a439b2" }],
 } as const;
