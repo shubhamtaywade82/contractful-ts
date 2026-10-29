@@ -22,11 +22,16 @@ export {
   ResponseShapeError,
   CircuitOpenError,
   QueueFullError,
+  EventsError,
+  EventsConnectionError,
+  MessageShapeError,
+  GraphQLError,
   asContractfulError,
   type Violation,
   type ContractfulErrorOptions,
   type HttpStatusErrorOptions,
   type ResponseShapeErrorOptions,
+  type MessageShapeErrorOptions,
 } from './errors.js';
 
 /* Param DSL --------------------------------------------------------------- */
@@ -102,6 +107,44 @@ export { joinUrl, buildUrl } from './http/transport.js';
 
 /* Pagination --------------------------------------------------------------- */
 export { paginate, pages, cursor, collect, type PageOptions, type CursorOptions, type CursorPage } from './pagination.js';
+
+/* Events (WebSocket) -------------------------------------------------------- */
+export {
+  EventsClient,
+  matchTopic,
+  defineEvents,
+  subscribe,
+  publish,
+  createGraphQLWsClient,
+  ReconnectingSocket,
+  defaultSocketFactory,
+  resolveWebSocketCtor,
+  backoffDelayMs,
+  type EventsClientOptions,
+  type ChannelOptions,
+  type ChannelDefinition,
+  type ChannelMethod,
+  type ChannelMessage,
+  type ChannelParams,
+  type EventsChannels,
+  type EventsOptions,
+  type EventsClientInstance,
+  type EventsClientConstructor,
+  type EventsClientBase,
+  type EventsChannelClientOptions,
+  type EventsConnectionState,
+  type MessageHandler,
+  type SocketFactory,
+  type SocketLike,
+  type TopicContext,
+  type SubscribeContext,
+  type WebSocketAuthMode,
+  type GraphQLWsClient,
+  type GraphQLWsOptions,
+  type GraphQLOperation,
+  type GraphQLSubscription,
+  type GraphQLSubscriptionHandlers,
+} from './events/index.js';
 
 /* Validation (advanced use) ------------------------------------------------ */
 export {

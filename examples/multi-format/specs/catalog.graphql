@@ -1,0 +1,13 @@
+type Product {
+  id: ID!
+  title: String!
+  price: Float
+}
+
+type Query {
+  product(id: ID!): Product
+}
+
+type Subscription {
+  priceChanged(productId: ID!): Product!
+}

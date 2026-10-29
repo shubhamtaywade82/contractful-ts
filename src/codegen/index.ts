@@ -3,11 +3,18 @@
  * importable directly:
  *
  * ```ts
- * import { generateFromOpenAPI } from 'contractful-ts/codegen';
+ * import { generateFromOpenAPI, runCodegen } from 'contractful-ts/codegen';
  *
- * const files = await generateFromOpenAPI('./openapi.json', {
- *   groupBy: 'tag',
- *   importFrom: 'contractful-ts',
+ * // Single spec:
+ * const files = await generateFromOpenAPI('./openapi.json', { groupBy: 'tag' });
+ *
+ * // Multi-source config (OpenAPI + AsyncAPI + Postman + GraphQL):
+ * const bundle = await runCodegen({
+ *   output: 'src/generated/clients',
+ *   sources: [
+ *     { path: 'specs/rest.yaml', namespace: 'rest' },
+ *     { path: 'specs/events.yaml', namespace: 'events' },
+ *   ],
  * });
  * ```
  */
@@ -16,12 +23,50 @@ import { buildApiIR, loadSpec, type ApiIR, type BuildIROptions, type OpenApiSpec
 import { emitContracts, type EmitOptions, type EmittedFile } from './emitter.js';
 import { parseYaml, YamlParseError, type YamlLine } from './yaml.js';
 
-export { loadSpec, parseSpecText, buildApiIR, dereference, OpenApiError, toCamelCase } from './openapi.js';
+export { loadSpec, parseSpecText, buildApiIR, dereference, readSourceText, OpenApiError, toCamelCase, toPascalCase, toKebabCase, sanitizeGroup, sanitizeIdentifier, uniqueName, schemaFrom } from './openapi.js';
 export type { OpenApiSpec, Json, JsonRecord, ApiIR, ApiGroupIR, OperationIR, ParamIR, ResponseIR, SchemaIR, BuildIROptions, ParamLocationIR } from './openapi.js';
 export { emitContracts } from './emitter.js';
 export type { EmitOptions, EmittedFile } from './emitter.js';
 export { parseYaml, YamlParseError } from './yaml.js';
 export type { YamlLine } from './yaml.js';
+
+/* Format detection + canonical model ------------------------------------- */
+export { detectSpecKind, detectSpecObject } from './detect.js';
+export type { DetectedSpecKind } from './detect.js';
+export {
+  modelFromHttpIr,
+  modelFromEventsIr,
+  httpIrFromModel,
+  eventsIrFromModel,
+  serializeModel,
+  parseModel,
+  mergeModels,
+} from './model.js';
+export type { SpecKind, CanonicalModel, ChannelIR, ChannelGroupIR, EventsIR } from './model.js';
+
+/* AsyncAPI --------------------------------------------------------------- */
+export { loadAsyncApiSpec, buildEventsIR, AsyncApiError } from './asyncapi.js';
+export type { AsyncApiPerspective, BuildEventsIROptions } from './asyncapi.js';
+
+/* Events emitter --------------------------------------------------------- */
+export { emitEvents } from './events-emit.js';
+
+/* Postman ---------------------------------------------------------------- */
+export { buildPostmanIR, inferSchemaFromValue, PostmanError } from './postman.js';
+export type { BuildPostmanIROptions } from './postman.js';
+
+/* GraphQL ---------------------------------------------------------------- */
+export { parseGraphQLSdl, GraphQLParseError } from './graphql.js';
+export type { GqlDocument, GqlField, GqlArg, GqlTypeRef, GqlObjectType } from './graphql.js';
+export { emitGraphql, emitGraphqlFromSdl } from './graphql-emit.js';
+export type { GraphQLEmitOptions } from './graphql-emit.js';
+
+/* Standalone emit -------------------------------------------------------- */
+export { emitStandaloneHttp, emitStandaloneEvents } from './standalone.js';
+
+/* Config runner ----------------------------------------------------------- */
+export { loadCodegenConfig, runCodegen, dumpModels } from './config.js';
+export type { CodegenConfig, CodegenSource, GeneratedBundle } from './config.js';
 
 export interface GenerateOptions extends BuildIROptions, Omit<EmitOptions, 'specOrigin'> {}
 

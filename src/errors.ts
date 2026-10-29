@@ -243,6 +243,64 @@ export class QueueFullError extends ContractfulError {
   }
 }
 
+/**
+ * Base class for event/WebSocket runtime failures: the socket could not be
+ * created, the connection dropped, or an operation was attempted in a state
+ * that does not allow it.
+ */
+export class EventsError extends ContractfulError {
+  constructor(message: string, options: ContractfulErrorOptions = {}) {
+    super(message, options);
+  }
+}
+
+/** The connection failed (or dropped) and the reconnect budget is exhausted. */
+export class EventsConnectionError extends EventsError {
+  readonly attempts: number;
+
+  constructor(message: string, attempts: number, cause?: unknown) {
+    super(message, { cause, retryable: true });
+    this.attempts = attempts;
+  }
+}
+
+export interface MessageShapeErrorOptions {
+  topic: string | null;
+  violations: Violation[];
+}
+
+/**
+ * An incoming event message did not satisfy the fields declared by its
+ * channel (missing required keys or wrong kinds). The raw frame is attached.
+ */
+export class MessageShapeError extends ContractfulError {
+  readonly topic: string | null;
+  readonly violations: Violation[];
+  readonly raw: unknown;
+
+  constructor(options: MessageShapeErrorOptions & { raw?: unknown }) {
+    super(
+      `Message shape mismatch on ${options.topic ?? '(no topic)'}: ${options.violations
+        .map((v) => `${v.param} ${v.message}`)
+        .join('; ')}`,
+      { retryable: false },
+    );
+    this.topic = options.topic;
+    this.violations = options.violations;
+    this.raw = options.raw;
+  }
+}
+
+/** A GraphQL response carried a non-empty `errors` array. */
+export class GraphQLError extends ContractfulError {
+  readonly errors: unknown[];
+
+  constructor(errors: unknown[]) {
+    super(`GraphQL operation failed: ${JSON.stringify(errors)}`, { retryable: false });
+    this.errors = errors;
+  }
+}
+
 /** Inspects an unknown thrown value and returns the library error it represents. */
 export function asContractfulError(err: unknown): ContractfulError | undefined {
   return err instanceof ContractfulError ? err : undefined;

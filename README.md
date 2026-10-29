@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](./package.json)
 
-**Contract-first HTTP client for TypeScript.** Declare the HTTP shape of an API — verb, path, typed parameters, expected responses — and get fully typed client methods with validation, auth, retries, circuit breakers and rate limiting. Ships with an OpenAPI → contract generator (`contractful-gen`) in the spirit of [binance-connector-js](https://github.com/binance/binance-connector-js).
+**Contract-first HTTP and WebSocket client for TypeScript.** Declare the shape of an API — verbs and paths, event channels, typed parameters, expected responses — and get fully typed client methods with validation, auth, retries, circuit breakers and rate limiting. Ships with `contractful-gen`, a universal generator that turns OpenAPI, AsyncAPI, Postman Collections and GraphQL SDL into typed clients, in the spirit of [binance-connector-js](https://github.com/binance/binance-connector-js).
 
 This is the TypeScript sibling of the Ruby gem [contractful](https://github.com/shubhamtaywade82/contractful):
 
@@ -23,7 +23,7 @@ The core idea survives the port unchanged: **closed request schemas** reject bad
 ## Install
 
 ```bash
-npm install contractful-ts   # peer: Node 18+, axios
+npm install contractful-ts   # Node 18+, axios (peer); `ws` is an optional peer for Node < 22
 ```
 
 ## Quick start
@@ -223,25 +223,102 @@ import { Contractful } from 'contractful-ts';
 const { body } = await Contractful.get('https://api.github.com/users/octocat');
 ```
 
-## Generating connectors from OpenAPI (`contractful-gen`)
+## Events (WebSocket)
 
-The CLI turns any OpenAPI 3.x / Swagger 2.0 spec (JSON or YAML, file or URL) into typed contract modules — one per tag, in the same auto-generated-connector style as Binance's connectors, but emitting the runtime DSL so the output stays readable, typed and editable.
+The events DSL is the sibling of `defineApi`: declare channels instead of endpoints, and the library derives a typed client with contractful's signature split — **outgoing messages are validated closed-world** (typos and missing required fields never reach the wire), **incoming messages are gated open-world** (unknown fields are data, declared fields must be well-formed).
+
+```ts
+import { defineEvents, subscribe, publish, P } from 'contractful-ts';
+
+export const OrderEvents = defineEvents({
+  name: 'OrderEvents',
+  url: 'wss://api.example.com/events',
+  channels: {
+    onOrderCreated: subscribe<{ orderId: string; total?: number }>('order.created', {
+      fields: {
+        orderId: P.string({ required: true }),
+        total: P.float({ min: 0 }),
+      },
+    }),
+    onItemAdded: subscribe<{ sku: string }>('order/:orderId/item.added', {
+      params: { orderId: P.string({ required: true }) },   // topic params, typed
+      fields: { sku: P.string({ required: true }) },
+    }),
+    createOrder: publish<{ productId: string; quantity: number }>('order.create', {
+      fields: {
+        productId: P.string({ required: true }),
+        quantity: P.integer({ required: true, min: 1 }),
+      },
+    }),
+  },
+});
+
+const events = new OrderEvents({ authMode: 'query', tokenProvider: () => token });
+await events.connect();
+
+const off = events.onOrderCreated((message, { topic }) => console.log(topic, message.orderId));
+await events.createOrder({ productId: 'p1', quantity: 2 }); // validated, then { topic, payload } envelope
+```
+
+The runtime underneath is production-shaped, not a thin wrapper:
+
+- **Reconnection** with exponential backoff + full jitter, attempt budgets, per-attempt connect timeouts — subscriptions survive reconnects.
+- **Heartbeats** with a liveness timeout that force-closes dead connections.
+- **Topic routing** — exact topics, `:param` patterns (`order/:id/created`), single-segment `*` and the global `*` wildcard.
+- **Envelopes are configurable** — the default is JSON `{ topic, payload }`; swap `publishEnvelope` / `topicExtractor` / `payloadExtractor` for Socket.IO-style `{ event, data }` or anything else, and inject a `socketFactory` to adapt any transport.
+- **Three browser-safe auth modes** — `query` (token in the URL, refreshed per attempt), `subprotocol`, and `first-message` — because browsers cannot set headers on the WebSocket upgrade.
+- The low-level `EventsClient` and `ReconnectingSocket` are exported for direct use; `ws` is loaded lazily as an optional peer in Node.
+
+Invalid incoming messages surface as `MessageShapeError` through `onError` (or your own `onInvalidMessage` hook) without dropping the connection.
+
+GraphQL subscriptions work too — `createGraphQLWsClient` speaks the `graphql-transport-ws` protocol (connection_init/ack, id-correlated next/error/complete, ping/pong, resubscribe after reconnect) on the same socket machinery.
+
+## Generating clients from any spec (`contractful-gen`)
+
+The CLI turns API descriptions into typed contract modules — one per group, in the same auto-generated-connector style as Binance's connectors, but emitting the runtime DSL so the output stays readable, typed and editable. Formats are auto-detected:
+
+| Format                   | Input                              | Output                                        |
+| ------------------------ | ---------------------------------- | --------------------------------------------- |
+| OpenAPI 3.x / Swagger 2.0 | `openapi: 3.x` / `swagger: 2.0`  | typed HTTP contracts (`defineApi`)            |
+| AsyncAPI 2.x / 3.x      | `asyncapi: 2.x` / `3.x`           | typed event channels (`defineEvents`)         |
+| Postman Collection v2.x | `info.schema: ...getpostman.com`  | HTTP contracts, types inferred from examples  |
+| GraphQL SDL             | `type Query { ... }`              | typed query/mutation client + subscriptions   |
+| api-model               | `kind: contractful-api-model`      | round-trip regeneration from a dumped model   |
 
 ```bash
-npx contractful-gen \
-  --spec ./openapi/petstore.yaml \
-  --out ./src/petstore \
-  --import-from contractful-ts
+npx contractful-gen --spec ./openapi/petstore.yaml --out ./src/petstore
+npx contractful-gen --spec ./asyncapi/events.yaml --out ./src/events
+npx contractful-gen --spec ./schema.graphql --out ./src/graphql
+npx contractful-gen --spec ./collection.postman_collection.json --out ./src/api
+```
+
+Or mix formats in one run with a config:
+
+```jsonc
+// codegen.json
+{
+  "output": "src/generated/clients",
+  "sources": [
+    { "path": "specs/rest.yaml", "namespace": "rest" },
+    { "path": "specs/events.yaml", "namespace": "events" },
+    { "path": "specs/support.postman_collection.json", "namespace": "support" },
+    { "path": "specs/catalog.graphql", "namespace": "catalog" }
+  ]
+}
+```
+
+```bash
+npx contractful-gen --config codegen.json
 ```
 
 ```
-contractful-gen: generated 4 file(s) for 12 operation(s) in 3 group(s)
-  · pet.ts (7 ops)
-  · store.ts (3 ops)
-  · user.ts (2 ops)
+contractful-gen: running config codegen.json (4 source(s)) ...
+contractful-gen: generated 12 file(s) across 4 namespace(s) → src/generated/clients
 ```
 
-Generated file (excerpt — this is real output for the Swagger petstore):
+Each namespace gets its own directory with an index; a root `index.ts` re-exports everything. A complete runnable example lives in [`examples/multi-format/`](examples/multi-format/) — four formats, one command, strict-tsc-clean output.
+
+Generated file (excerpt — real output for the Swagger petstore):
 
 ```ts
 // Auto-generated by contractful-gen from openapi/petstore.yaml — DO NOT EDIT.
@@ -282,12 +359,40 @@ What the generator maps automatically:
 CLI options:
 
 ```
---spec, -s <path|url>     OpenAPI/Swagger spec (JSON or YAML, file or URL)
---out, -o <dir>           Output directory
---base, -b <url>          Override the spec's server URL
---import-from, -i <pkg>   Import specifier (default: contractful-ts)
---group-by, -g <mode>     Group by tag (default) or path
---max-per-file <n>        Split large groups into files of at most n ops
+--spec, -s <path|url>       Spec (JSON/YAML file or URL; .graphql for SDL)
+--out, -o <dir>             Output directory
+--config, -c <file>         Multi-source config (JSON or YAML)
+--format, -f <kind>         Force format: auto|openapi|asyncapi|postman|graphql|api-model
+--namespace, -n <name>      Subdirectory for single-spec runs
+--emit <mode>               runtime (default) | standalone (zero runtime imports)
+--base, -b <url>            Override the spec's server / WebSocket URL
+--import-from, -i <pkg>     Import specifier (default: contractful-ts)
+--group-by, -g <mode>       Group HTTP contracts by tag (default) or path
+--perspective <p>           AsyncAPI direction: server (default) | client
+--max-per-file <n>          Split large groups into files of at most n ops
+--dump-model <file>         Write the canonical model as JSON instead of code
+```
+
+Format-specific notes:
+
+- **AsyncAPI** — `publish`/`subscribe` flip meaning depending on whose perspective the document is written from. The default `--perspective server` treats the doc as the API provider's (server `publish` → client subscribes); pass `client` for Streetlights-style documents that describe the client app. `{param}` channel addresses become typed topic params.
+- **Postman** — collections are examples, not contracts: types inferred from request/response examples are marked `(inferred from example)`, numeric strings stay strings, and detected collection auth is surfaced as a note on the generated client.
+- **GraphQL** — queries and mutations get one typed method each, executing a generated full-selection document (depth-capped, cycle-safe) through the HTTP transport; subscriptions speak `graphql-transport-ws` over the events runtime. `--dump-model` is not available for GraphQL sources.
+- **api-model** — `--dump-model` serializes any spec into the canonical model JSON, which is itself a valid input — handy for diffing, caching or pre-processing specs.
+
+### Standalone emit (zero runtime dependency)
+
+`--emit standalone` generates self-contained clients that import **nothing** from contractful-ts — a tiny fetch-based `_http.ts` and a dependency-free `_ws.ts` mini-runtime are emitted alongside the typed wrappers. Trade-off: types only, no validation/retries/circuit breaking. GraphQL subscriptions require the runtime mode.
+
+```bash
+npx contractful-gen --spec ./openapi/petstore.yaml --out ./src/petstore --emit standalone
+```
+
+```ts
+import { createPetsApi } from './src/petstore';
+
+const api = createPetsApi({ baseUrl: 'https://petstore3.swagger.io/api/v3' });
+const pets = await api.listPets({ limit: 20 });   // typed, fetch-based, no dependencies
 ```
 
 Notes on YAML support: the bundled parser is a dependency-free subset covering everything typical specs use (block/flow collections, quoted and block scalars, comments). Anchors/aliases (`&a`, `*a`) and external `$ref`s are rejected with clear errors — convert to JSON or inline them first.
@@ -295,10 +400,20 @@ Notes on YAML support: the bundled parser is a dependency-free subset covering e
 ### Programmatic generation
 
 ```ts
-import { generateFromOpenAPI } from 'contractful-ts/codegen';
+import { generateFromOpenAPI, runCodegen } from 'contractful-ts/codegen';
 
+// Single spec:
 const { ir, files } = await generateFromOpenAPI('./openapi.json', { groupBy: 'tag' });
-for (const file of files) console.log(file.path, file.content.length);
+
+// Multi-format config — every format the CLI supports:
+const bundle = await runCodegen({
+  output: 'src/generated/clients',
+  sources: [
+    { path: 'specs/rest.yaml', namespace: 'rest' },
+    { path: 'specs/events.yaml', namespace: 'events' },
+  ],
+});
+for (const file of bundle.files) console.log(file.path, file.content.length);
 ```
 
 ## Examples
@@ -306,18 +421,22 @@ for (const file of files) console.log(file.path, file.content.length);
 - [`examples/github/github.ts`](examples/github/github.ts) — public API, cursor pagination, closed-schema demos
 - [`examples/binance/binance.ts`](examples/binance/binance.ts) — Binance-style spot connector: HMAC-SHA256 request signing via `beforeRequest`, `X-MBX-APIKEY`, rate limiting, idempotent order placement (run: `node examples/binance/binance.ts`)
 - [`examples/openapi/petstore.yaml`](examples/openapi/petstore.yaml) + `examples/openapi/generated/` — spec and generated connector
+- [`examples/multi-format/`](examples/multi-format/) — OpenAPI + AsyncAPI + Postman + GraphQL in one `codegen.json` run, with strict-tsc-checked generated output
 
 ## Project layout
 
 ```
 src/
-  dsl/          contract(), defineApi(), param factories (P.*)
+  dsl/          contract(), defineApi(), defineEvents(), param factories (P.*)
   validation/   closed-request validation, open-response validation
   http/         axios transport, route/path builder, quick helpers
+  events/       WebSocket runtime: reconnecting socket, events client,
+                topic routing, graphql-transport-ws, events DSL
   middleware/   auth resolvers, retry policy, circuit breaker, rate limiter
-  codegen/      OpenAPI loader, YAML subset parser, TS emitter, CLI
-tests/          vitest suite (166 tests — unit + round-trip)
-examples/       GitHub + Binance-style connectors, OpenAPI fixtures
+  codegen/      format detection, canonical model, OpenAPI/AsyncAPI/Postman/
+                GraphQL adapters, TS emitters (runtime + standalone), CLI
+tests/          vitest suite (265 tests — unit + round-trips)
+examples/       GitHub + Binance-style connectors, OpenAPI + multi-format fixtures
 ```
 
 ## Development
@@ -328,7 +447,7 @@ npm run build    # tsc -> dist/
 npm test         # build + vitest run
 ```
 
-The test suite covers validation, path building, response classification, retry/backoff math, circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, and a codegen round-trip that imports generated files and runs them.
+The test suite covers validation, path building, response classification, retry/backoff math, circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, the events runtime against a scripted fake socket (reconnects, heartbeats, auth modes, routing), the graphql-transport-ws protocol, every format adapter, multi-source configs, and codegen round-trips that import generated files and run them — including strict `tsc` checks of generated output.
 
 ## License
 

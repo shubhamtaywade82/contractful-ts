@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "contractful-ts": ["../../../dist/index.d.ts"],
+      "contractful-ts/events": ["../../../dist/events/index.d.ts"]
+    }
+  },
+  "include": ["**/*.ts"]
+}

@@ -1,0 +1,45 @@
+{
+  "info": {
+    "name": "Shop Support Collection",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [{ "key": "baseUrl", "value": "https://support.shop.test" }],
+  "auth": { "type": "apikey" },
+  "item": [
+    {
+      "name": "Tickets",
+      "item": [
+        {
+          "name": "List tickets",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/tickets?status=open",
+              "host": ["{{baseUrl}}"],
+              "path": ["tickets"],
+              "query": [{ "key": "status", "value": "open", "description": "Filter by status" }]
+            }
+          },
+          "response": [
+            { "name": "ok", "code": 200, "body": "[{ \"id\": \"t-1\", \"status\": \"open\" }]" }
+          ]
+        },
+        {
+          "name": "Create ticket",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{baseUrl}}/tickets", "host": ["{{baseUrl}}"], "path": ["tickets"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"subject\": \"Broken widget\",\n  \"priority\": 2\n}",
+              "options": { "raw": { "language": "json" } }
+            }
+          },
+          "response": [
+            { "name": "created", "code": 201, "body": "{ \"id\": \"t-9\", \"subject\": \"Broken widget\" }" }
+          ]
+        }
+      ]
+    }
+  ]
+}

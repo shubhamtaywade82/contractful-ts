@@ -39,6 +39,25 @@ export class OpenApiError extends Error {
   }
 }
 
+/** Reads a spec source (http(s) URL or file path) as raw text. */
+export async function readSourceText(source: string): Promise<string> {
+  const isUrl = /^https?:\/\//i.test(source);
+  if (isUrl) {
+    const res = await fetch(source);
+    if (!res.ok) {
+      throw new OpenApiError(`Fetching ${source} failed with HTTP ${res.status}`);
+    }
+    return res.text();
+  }
+  try {
+    return await readFile(source, 'utf8');
+  } catch (err) {
+    throw new OpenApiError(
+      `Could not read spec file ${source}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 /** Loads a spec from a file path, an http(s) URL, or a raw document string. */
 export async function loadSpec(source: string): Promise<OpenApiSpec> {
   let text: string;
@@ -50,14 +69,12 @@ export async function loadSpec(source: string): Promise<OpenApiSpec> {
       throw new OpenApiError(`Fetching ${source} failed with HTTP ${res.status}`);
     }
     text = await res.text();
+  } else if (!source.includes('\n') && !source.trimStart().startsWith('{')) {
+    // Single-line, non-JSON source: treat as a file path even when the file
+    // is missing so the error message names the path.
+    text = await readSourceText(source);
   } else {
-    try {
-      text = await readFile(source, 'utf8');
-    } catch (err) {
-      throw new OpenApiError(
-        `Could not read spec file ${source}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
+    text = source;
   }
 
   return parseSpecText(text, source);
@@ -212,6 +229,8 @@ export interface ApiIR {
   version?: string;
   base: string;
   groups: ApiGroupIR[];
+  /** Free-form notes surfaced in generated file headers (e.g. auth hints). */
+  notes?: string[];
 }
 
 export interface BuildIROptions {
@@ -436,7 +455,7 @@ function firstEntry(record: JsonRecord): JsonRecord | undefined {
   return undefined;
 }
 
-function schemaFrom(raw: JsonRecord | undefined): SchemaIR {
+export function schemaFrom(raw: JsonRecord | undefined): SchemaIR {
   if (!raw || typeof raw !== 'object') return {};
   const out: SchemaIR = {};
   if (typeof raw.type === 'string') out.type = raw.type;
@@ -482,12 +501,12 @@ export function toCamelCase(input: string): string {
   );
 }
 
-function toPascalCase(input: string): string {
+export function toPascalCase(input: string): string {
   const camel = toCamelCase(input);
   return camel[0]!.toUpperCase() + camel.slice(1);
 }
 
-function toKebabCase(input: string): string {
+export function toKebabCase(input: string): string {
   return input
     .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
     .replace(/[^a-zA-Z0-9]+/g, '-')
@@ -495,12 +514,12 @@ function toKebabCase(input: string): string {
     .toLowerCase() || 'group';
 }
 
-function sanitizeGroup(name: string): string {
+export function sanitizeGroup(name: string): string {
   const cleaned = name.replace(/[^a-zA-Z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
   return cleaned.length > 0 ? cleaned : 'default';
 }
 
-function sanitizeIdentifier(name: string): string {
+export function sanitizeIdentifier(name: string): string {
   const cleaned = name.replace(/[^a-zA-Z0-9_$]+/g, '_').replace(/^(\d)/, '_$1');
   const reserved = new Set([
     'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
@@ -520,7 +539,7 @@ function methodNameFromPath(method: string, path: string): string {
   return toCamelCase(`${method} ${segments.join(' ')}`);
 }
 
-function uniqueName(base: string, used: Set<string>): string {
+export function uniqueName(base: string, used: Set<string>): string {
   const candidate = sanitizeIdentifier(base);
   if (!used.has(candidate)) return candidate;
   let i = 2;

@@ -1,12 +1,17 @@
 {
   "name": "contractful-ts",
-  "version": "0.1.0",
-  "description": "Contract-first HTTP client for TypeScript. Declare the HTTP shape of an API; get typed client methods with validation, auth, retries, circuit breakers and rate limiting. Includes an OpenAPI -> contract code generator.",
+  "version": "0.2.0",
+  "description": "Contract-first HTTP and WebSocket client for TypeScript. Declare the shape of an API; get typed client methods with validation, auth, retries, circuit breakers and rate limiting. Generates clients from OpenAPI, AsyncAPI, Postman Collections and GraphQL SDL.",
   "keywords": [
     "contract-first",
     "api-client",
     "http-client",
+    "websocket",
+    "events",
     "openapi",
+    "asyncapi",
+    "postman",
+    "graphql",
     "codegen",
     "connector",
     "validation",
@@ -29,6 +34,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./events": {
+      "types": "./dist/events/index.d.ts",
+      "default": "./dist/events/index.js"
+    },
     "./codegen": {
       "types": "./dist/codegen/index.d.ts",
       "default": "./dist/codegen/index.js"
@@ -47,11 +56,20 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",
+    "generate": "node dist/codegen/cli.js --config codegen.json",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "prepublishOnly": "npm run build && vitest run"
   },
   "dependencies": {
     "axios": "^1.7.0"
+  },
+  "peerDependencies": {
+    "ws": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

@@ -1,0 +1,9 @@
+{
+  "output": "examples/multi-format/generated",
+  "sources": [
+    { "path": "examples/multi-format/specs/rest.yaml", "kind": "openapi", "namespace": "rest" },
+    { "path": "examples/multi-format/specs/events.yaml", "kind": "asyncapi", "namespace": "events" },
+    { "path": "examples/multi-format/specs/support.postman_collection.json", "kind": "postman", "namespace": "support" },
+    { "path": "examples/multi-format/specs/catalog.graphql", "kind": "graphql", "namespace": "catalog" }
+  ]
+}
