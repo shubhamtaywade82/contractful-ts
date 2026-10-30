@@ -19,9 +19,8 @@
  * ```
  */
 
-import { buildApiIR, loadSpec, type ApiIR, type BuildIROptions, type OpenApiSpec } from './openapi.js';
+import { buildApiIR, loadSpec, parseSpecText, type ApiIR, type BuildIROptions, type OpenApiSpec } from './openapi.js';
 import { emitContracts, type EmitOptions, type EmittedFile } from './emitter.js';
-import { parseYaml, YamlParseError, type YamlLine } from './yaml.js';
 
 export { loadSpec, parseSpecText, buildApiIR, dereference, readSourceText, OpenApiError, toCamelCase, toPascalCase, toKebabCase, sanitizeGroup, sanitizeIdentifier, uniqueName, schemaFrom } from './openapi.js';
 export type { OpenApiSpec, Json, JsonRecord, ApiIR, ApiGroupIR, OperationIR, ParamIR, ResponseIR, SchemaIR, BuildIROptions, ParamLocationIR, SecuritySchemeIR } from './openapi.js';
@@ -99,11 +98,10 @@ export function generateFromSpecText(
   text: string,
   options: GenerateOptions = {},
 ): { ir: ApiIR; files: EmittedFile[] } {
-  // Reuse loadSpec's JSON/YAML detection without touching the filesystem.
-  const isJson = text.trimStart().startsWith('{');
-  const spec: OpenApiSpec = isJson
-    ? (JSON.parse(text) as OpenApiSpec)
-    : (parseYaml(text) as OpenApiSpec);
+  // parseSpecText (not a bare JSON.parse/parseYaml) so broken JSON/YAML and
+  // non-object documents fail with the same OpenApiError as every other
+  // entry point instead of leaking SyntaxError / YamlParseError.
+  const spec = parseSpecText(text, 'spec');
   return generateFromSpec(spec, options);
 }
 

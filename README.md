@@ -643,8 +643,10 @@ src/
   middleware/   auth resolvers, retry policy, circuit breaker, rate limiter
   codegen/      format detection, canonical model, OpenAPI/AsyncAPI/Postman/
                 GraphQL adapters, TS emitters (runtime + standalone), CLI
-tests/          vitest suite (355 tests — unit + round-trips + retry-safety, OpenAPI
-                wire-format and signing regressions + the e2e ticket demo);
+tests/          vitest suite (408 tests — unit + round-trips + retry-safety, OpenAPI
+                wire-format and signing regressions + the e2e ticket demo +
+                real-server transport boundary, lifecycle/cancellation races,
+                malformed-spec rejection and generator round-trip determinism);
                 tests/types/ additionally strict-tsc-checked (compile-time contracts)
 examples/       end-to-end ticket demo, GitHub + Binance-style connectors,
                 OpenAPI + multi-format fixtures

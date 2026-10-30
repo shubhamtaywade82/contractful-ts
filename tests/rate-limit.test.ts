@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { QueueFullError, RateLimiter } from '../src/index.js';
+import { QueueFullError, RateLimiter, RequestAbortedError } from '../src/index.js';
 
 describe('RateLimiter', () => {
   it('paces requests at the configured rate', async () => {
@@ -48,5 +48,37 @@ describe('RateLimiter', () => {
     expect(() => new RateLimiter(0)).toThrow();
     expect(() => new RateLimiter(-5)).toThrow();
     expect(() => new RateLimiter(Number.NaN)).toThrow();
+  });
+
+  it('a waiter aborted while waiting rejects promptly, cancels its slot and frees queue space', async () => {
+    const limiter = new RateLimiter(5, { burst: 1, maxQueue: 5 }); // 200ms interval
+    const first = limiter.acquire(); // immediate slot
+    const t0 = Date.now();
+
+    const controller = new AbortController();
+    const waiting = limiter.acquire(controller.signal); // scheduled ~200ms out
+    setTimeout(() => controller.abort(), 20);
+
+    await expect(waiting).rejects.toBeInstanceOf(RequestAbortedError);
+    expect(Date.now() - t0).toBeLessThan(150); // far before the 200ms slot
+
+    // The cancelled slot and queue space are reusable afterwards.
+    await first;
+    const after = limiter.acquire(); // paced, but accepted
+    await after;
+  });
+
+  it('a pre-aborted signal rejects without queueing at all', async () => {
+    const limiter = new RateLimiter(1000, { burst: 1 });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(limiter.acquire(controller.signal)).rejects.toBeInstanceOf(
+      RequestAbortedError,
+    );
+    expect(limiter.queued).toBe(0);
+
+    // The limiter itself is unaffected.
+    await limiter.acquire();
   });
 });

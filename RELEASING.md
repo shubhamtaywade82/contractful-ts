@@ -55,12 +55,23 @@ either one command or fully automatic once the `NPM_TOKEN` secret exists.
    ```
 
 6. **The Release workflow takes over** (`.github/workflows/release.yml`):
+   - resolves the tag, cross-checks it against `package.json`'s version
+     (`v0.4.0` must match version `0.4.0` — mismatches fail fast);
    - runs the full verification matrix on the tag;
    - creates a **draft GitHub Release** with generated notes and the packed
      `contractful-ts-<version>.tgz` attached;
    - publishes to npm **only if `NPM_TOKEN` is configured** — otherwise it
-     stops at the draft release.
-7. **Without the token, publish manually:**
+     stops at the draft release. If the version is already on npm, the
+     publish is skipped instead of erroring, so re-runs are idempotent.
+7. **Re-releasing an existing tag** (token was missing, registry hiccup,
+   release job failed after the tag was pushed): no tag deletion needed —
+   Actions tab → *Release* workflow → *Run workflow* → enter the tag
+   (e.g. `v0.4.0`). The workflow checks out that tag and re-runs
+   verification, refreshes the draft release, and publishes only if the
+   version is not already on npm. `skip_publish` drafts a release without
+   touching npm. (Manual dispatch requires the `tag` input — dispatching
+   without it fails fast rather than releasing a branch.)
+8. **Without the token, publish manually:**
 
    ```bash
    npm publish --access public
@@ -68,7 +79,7 @@ either one command or fully automatic once the `NPM_TOKEN` secret exists.
 
    (Upload the same tarball attached to the GitHub Release:
    `npm publish contractful-ts-<version>.tgz`.)
-8. **Finalize.** Review the draft release notes on GitHub and publish the
+9. **Finalize.** Review the draft release notes on GitHub and publish the
    release. Verify: `npm view contractful-ts version` shows the new version,
    and a fresh `npm install contractful-ts` in a scratch project can import
    `contractful-ts` and run `npx contractful-gen --help`.
@@ -79,7 +90,7 @@ either one command or fully automatic once the `NPM_TOKEN` secret exists.
 | --- | --- |
 | `npm run build` (strict `tsc`) | type errors in `src/`, broken declaration emit |
 | `npm run typecheck` | same, plus the compile-time test contracts in `tests/types/` (inference regressions) |
-| `npx vitest run` (355 tests) | behavior: validation, retry safety, wire formats, events runtime, codegen round-trips, the e2e ticket demo |
+| `npx vitest run` (408 tests) | behavior: validation, retry safety, wire formats, events runtime, codegen round-trips, the e2e ticket demo, real-transport boundary (local HTTP server), lifecycle/cancellation races, malformed-spec rejection |
 | tarball smoke test | packaging: `files`/`exports` completeness, the installed bin symlink, declaration resolution from the artifact, CLI execution from `node_modules/.bin` |
 
 The tarball smoke test exists because unit tests run against source and

@@ -495,7 +495,9 @@ export function defineApi<C extends ApiContracts>(
           await this.#breakers.beforeRequest(host);
         }
         if (this.#limiters) {
-          await this.#limiters.for(host).acquire();
+          // The signal covers the queue wait too: an aborted caller must not
+          // sit in the rate-limit queue until its slot finally arrives.
+          await this.#limiters.for(host).acquire(prepared.meta._signal);
         }
 
         // Fresh, mutation-safe copies per attempt (hooks/auth may edit them).

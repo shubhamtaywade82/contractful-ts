@@ -6,10 +6,15 @@
  * `burst` allowance. Callers await `acquire()` before dispatching.
  */
 
-import { QueueFullError } from '../errors.js';
+import { QueueFullError, RequestAbortedError } from '../errors.js';
 
 interface Waiter {
+  /** Signals the caller that its slot arrived (no-op after the first settle). */
   resolve: () => void;
+  /** Rejects the caller (abort) — cancels a scheduled but unfired slot. */
+  reject: (err: Error) => void;
+  /** The pending slot timer while the waiter is scheduled but unfired. */
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 export class RateLimiter {
@@ -37,20 +42,56 @@ export class RateLimiter {
     this.#lastRefill = Date.now();
   }
 
-  /** Resolves when the caller may dispatch its request. */
-  acquire(): Promise<void> {
+  /**
+   * Resolves when the caller may dispatch its request.
+   *
+   * Honors an `AbortSignal`: a caller aborted while waiting for its slot —
+   * whether still queued or already scheduled by the pacing clock — leaves
+   * cleanly (cancelling the unfired slot timer) and rejects with
+   * {@link RequestAbortedError} instead of holding the request open until
+   * its turn would have arrived.
+   */
+  acquire(signal?: AbortSignal): Promise<void> {
     if (this.#pending >= this.#maxPending) {
       return Promise.reject(new QueueFullError(this.#maxPending));
     }
+    if (signal?.aborted) {
+      return Promise.reject(
+        new RequestAbortedError('Aborted while waiting for a rate-limit slot'),
+      );
+    }
     this.#pending += 1;
-    return new Promise<void>((resolve) => {
-      this.#queue.push({
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const waiter: Waiter = {
         resolve: () => {
+          if (settled) return;
+          settled = true;
           this.#pending -= 1;
           resolve();
         },
-      });
+        reject: (err: Error) => {
+          if (settled) return;
+          settled = true;
+          this.#pending -= 1;
+          reject(err);
+        },
+        timer: null,
+      };
+      const onAbort = (): void => {
+        // Not yet scheduled: leave the pending queue.
+        const index = this.#queue.indexOf(waiter);
+        if (index >= 0) this.#queue.splice(index, 1);
+        // Scheduled but unfired: give the slot back before leaving.
+        if (waiter.timer) {
+          clearTimeout(waiter.timer);
+          waiter.timer = null;
+        }
+        waiter.reject(new RequestAbortedError('Aborted while waiting for a rate-limit slot'));
+      };
+      this.#queue.push(waiter);
       this.#drain();
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -77,7 +118,10 @@ export class RateLimiter {
           this.#nextFreeAt = slotAt + this.#intervalMs;
         }
         const waitMs = Math.max(0, slotAt - now);
-        setTimeout(() => waiter.resolve(), waitMs);
+        waiter.timer = setTimeout(() => {
+          waiter.timer = null;
+          waiter.resolve();
+        }, waitMs);
       }
     } finally {
       this.#draining = false;

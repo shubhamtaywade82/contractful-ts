@@ -296,10 +296,31 @@ const VERBS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch'] as co
 
 /** Builds the generator IR from a parsed OpenAPI document. */
 export function buildApiIR(spec: OpenApiSpec, options: BuildIROptions = {}): ApiIR {
-  const isV2 = spec.swagger?.startsWith('2') ?? false;
+  // Malformed-spec gate: a document that declares neither an `openapi` nor a
+  // `swagger` version is not an OpenAPI document. Building an (empty) client
+  // from it silently — e.g. because the wrong format was forced — is exactly
+  // the "silently wrong output" failure mode the generator must avoid.
+  const specVersion =
+    typeof spec.openapi === 'string' ? spec.openapi : typeof spec.swagger === 'string' ? spec.swagger : undefined;
+  if (!specVersion) {
+    throw new OpenApiError(
+      'Document does not look like OpenAPI: missing the "openapi" (3.x) or "swagger" (2.0) ' +
+        'version field. If this is another format (AsyncAPI, Postman, GraphQL, api-model), ' +
+        'let the CLI auto-detect it or pass --format explicitly.',
+    );
+  }
+  const isV2 = specVersion.startsWith('2');
   const title = (spec.info?.title ?? 'Api').trim() || 'Api';
   const version = spec.info?.version;
   const warnings: string[] = [];
+  if (spec.paths === undefined || spec.paths === null) {
+    // Legal in OpenAPI 3.1, required in 2.0/3.0 — never silent, always a
+    // visible warning next to the (empty) generated client.
+    warnings.push(
+      'The spec declares no "paths" object — the generated client will have no operations. ' +
+        '(OpenAPI 2.0 and 3.0 require "paths"; 3.1 allows omitting it.)',
+    );
+  }
 
   let base = options.base;
   if (!base) {

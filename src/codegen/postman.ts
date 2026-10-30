@@ -41,7 +41,23 @@ export function buildPostmanIR(
   collection: JsonRecord,
   options: BuildPostmanIROptions = {},
 ): ApiIR {
+  // Malformed-spec gate: mirroring `buildApiIR`, a document without the
+  // collection shape must fail loudly instead of emitting an empty client.
   const info = collection.info;
+  const infoRecord = typeof info === 'object' && info !== null ? (info as JsonRecord) : null;
+  const looksLikeCollection =
+    infoRecord !== null &&
+    typeof infoRecord.name === 'string' &&
+    (Array.isArray(collection.item) ||
+      infoRecord._postman_id !== undefined ||
+      typeof infoRecord.schema === 'string');
+  if (!looksLikeCollection) {
+    throw new PostmanError(
+      'Document does not look like a Postman Collection v2.x: expected an `info` object ' +
+        '(with `name`) and an `item` array (or a `schema`/`_postman_id` marker). ' +
+        'If this is another format, let the CLI auto-detect it or pass --format explicitly.',
+    );
+  }
   const title =
     typeof info === 'object' && info !== null && typeof (info as JsonRecord).name === 'string'
       ? ((info as JsonRecord).name as string).trim() || 'PostmanApi'

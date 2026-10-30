@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.4.1 — Resilience audit: cancellation in the pipeline, real-transport coverage, malformed-spec gates
+
+### Fixed: aborted requests no longer hang in the rate-limit queue
+
+- `RateLimiter.acquire()` now accepts an `AbortSignal` (passed by the request
+  pipeline): a caller aborted while waiting for its pacing slot rejects
+  immediately with `RequestAbortedError` and cancels its scheduled-but-unfired
+  slot timer, instead of holding the request open until the slot would have
+  arrived. The freed slot and queue space stay reusable.
+- Abort coverage previously depended on the transport noticing the signal;
+  now both waits owned by the library itself (rate-limit pacing and retry
+  backoff) reject on abort.
+
+### Fixed: malformed specs are rejected loudly, never silently emitted
+
+- `buildApiIR()` throws `OpenApiError` for documents that declare neither an
+  `openapi` nor a `swagger` version (e.g. another format's document fed to
+  the OpenAPI path with a forced `--format`) instead of generating an empty
+  client. A valid OpenAPI document without `paths` (legal only in 3.1)
+  still generates, with a visible warning in `ir.notes`.
+- `buildPostmanIR()` mirrors the gate: documents without the collection
+  shape (`info.name` + `item`/`schema`/`_postman_id`) throw `PostmanError`.
+- `generateFromSpecText()` now parses through `parseSpecText`, so broken
+  JSON/YAML and scalar/array-rooted documents surface as `OpenApiError`
+  like every other entry point, instead of leaking raw `SyntaxError` /
+  `YamlParseError`.
+
+### Hardened: Release workflow supports manual re-releases
+
+- `workflow_dispatch` with a `tag` input re-runs verification, refreshes the
+  draft GitHub Release and publishes to npm for an existing tag — no tag
+  deletion/re-push (the recovery path for a missing `NPM_TOKEN` or a
+  registry hiccup). `skip_publish` drafts without touching npm.
+- A `resolve` job cross-checks the tag against `package.json`'s version and
+  fails fast on mismatch; the publish step is idempotent (a version already
+  on npm is skipped, not re-published).
+
+### Tests: +53 (355 → 408) across four new dimensions
+
+- **Real-transport boundary** (`tests/axios-transport.test.ts`, 17): a
+  genuine local HTTP server through the default AxiosTransport — wire
+  formats (query/headers/JSON + form bodies), status passthrough (5xx
+  resolved), non-JSON and 204 bodies, header normalization, ECONNREFUSED /
+  timeout / abort / pre-aborted error mapping, plus full-pipeline behavior
+  (typed round-trip, GET retry after 5xx, POST not retried on 5xx, 429 +
+  Retry-After honored, idempotency key stable across attempts, auth header,
+  abort during backoff).
+- **Lifecycle races & cancellation** (`tests/lifecycle.test.ts`, 12):
+  abort-in-queue, pre-aborted signals, queue-full through the client,
+  pacing applied to retry attempts, abort during backoff, aborted half-open
+  circuit probes freeing their slot, and events-runtime races (close during
+  backoff with no zombie timer, concurrent `open()` sharing one attempt,
+  exhausted budgets resetting, failing factories, forced reconnect during
+  backoff connecting exactly once).
+- **Malformed-spec rejection** (`tests/malformed-specs.test.ts`, 13):
+  broken JSON/YAML text, scalar/array roots, missing files, non-OpenAPI
+  and non-Postman documents (direct and through `runCodegen` with a forced
+  kind), no-`paths` warning, and valid specs still passing the gates.
+- **Generator round-trip determinism**
+  (`tests/generator-roundtrip.test.ts`, 8): byte-identical emission for
+  repeated runs and after a `serialize → parse → IR` cycle (HTTP and
+  events), models as serialization fixed points, lossless operation sets,
+  stable source hashing.
+- Two `RateLimiter` unit tests pin the new abort semantics directly.
+
 ## 0.4.0 — Correctness audit fixes: retry safety, OpenAPI wire fidelity, inference, packaging
 
 ### Fixed: unsafe retries of non-idempotent requests (release blocker)
