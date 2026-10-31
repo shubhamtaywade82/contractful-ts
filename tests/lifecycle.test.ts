@@ -388,3 +388,48 @@ describe('events runtime lifecycle races', () => {
     expect(created).toBe(2); // exactly one new connection
   });
 });
+
+describe('connect-timeout against a standard-constructor zombie socket', () => {
+  /**
+   * Reproduces the WHATWG-conformant hazard the global `WebSocket` has on
+   * servers that accept TCP but never complete the upgrade: `close()`
+   * during CONNECTING cannot abort the handshake, so `onclose` never
+   * fires and a naive implementation waits forever. (`ws` aborts
+   * immediately — which is why Node 18/20 CI jobs never saw this.)
+   */
+  it('force-recovers when the timed-out socket never produces onclose', async () => {
+    let created = 0;
+    let closes = 0;
+    const socket = new ReconnectingSocket({
+      url: 'ws://zombie.test',
+      // A socket whose close() is silently swallowed while CONNECTING and
+      // which never opens, never errors, never closes.
+      socketFactory: () => {
+        created++;
+        return {
+          onopen: null,
+          onmessage: null,
+          onclose: null,
+          onerror: null,
+          send: () => undefined,
+          close: () => {
+            closes++;
+            // swallowed: no onclose, exactly like the standard constructor
+            // against a never-upgrading server.
+          },
+        };
+      },
+      connectTimeoutMs: 40,
+      reconnectMaxAttempts: 2,
+      reconnectBaseDelayMs: 10,
+    });
+
+    await expect(socket.open()).rejects.toThrow();
+    expect(socket.state).toBe('failed');
+    // Budget 2 = the initial attempt + 2 reconnects (3 connections), and
+    // every attempt tried the polite close() first before force-recovery.
+    expect(socket.failedAttempts).toBe(2);
+    expect(created).toBe(3);
+    expect(closes).toBe(3);
+  });
+});

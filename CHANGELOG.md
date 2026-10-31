@@ -2,6 +2,20 @@
 
 ## 0.4.2 — Real-server integration, browser compatibility, AsyncAPI edges, Binance testnet harness
 
+### Fixed: connect timeouts no longer hang against never-upgrading servers
+
+- The standard `WebSocket` constructor's `close()` cannot abort an
+  in-flight handshake (per the WHATWG spec it only closes the connection
+  once established) — so when the connect timeout fired against a server
+  that accepts TCP but never completes the upgrade, `onclose` never
+  arrived and reconnection stalled forever on Node 22+ (whose global
+  constructor conforms strictly; the `ws` package aborts immediately,
+  which is why Node 18/20 were unaffected). The connect-timeout path now
+  force-recovers: after a grace period the socket is terminated when
+  possible (`ws`), detached, and the failure/reconnect path runs regardless
+  — stale events from the zombie socket are ignored. Found by the new
+  real-server suite failing on the Node 22 CI leg.
+
 ### Fixed: header auth now works on Node 22+ through the default socket factory
 
 - The default factory prefers the global `WebSocket` (browsers, Node 22+),
@@ -49,7 +63,8 @@
   the documented untyped-payload limitation for non-object payloads.
 - `ws` + `@types/ws` joined the dev dependencies (server side of the new
   tests); the runtime dependency surface is unchanged — `ws` stays an
-  optional peer.
+  optional peer. +26 tests (408 → 434), including a deterministic
+  zombie-socket regression for the connect-timeout fix.
 
 ## 0.4.1 — Resilience audit: cancellation in the pipeline, real-transport coverage, malformed-spec gates
 

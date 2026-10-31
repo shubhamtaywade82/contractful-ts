@@ -148,6 +148,8 @@ export class ReconnectingSocket {
   #lastError: unknown = undefined;
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   #connectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Forced-recovery fallback for sockets that ignore a connect-timeout close. */
+  #connectKillTimer: ReturnType<typeof setTimeout> | null = null;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   /** True while an attempt is resolving its URL/auth providers and factory. */
   #attemptBusy = false;
@@ -318,7 +320,10 @@ export class ReconnectingSocket {
   }
 
   #wire(socket: SocketLike): void {
+    // Events from a detached (force-recovered) socket are stale: the
+    // connection has already been torn down and possibly replaced.
     socket.onopen = () => {
+      if (this.#socket !== socket) return;
       if (this.#connectTimer) {
         clearTimeout(this.#connectTimer);
         this.#connectTimer = null;
@@ -347,10 +352,12 @@ export class ReconnectingSocket {
       })();
     };
     socket.onmessage = (event: unknown) => {
+      if (this.#socket !== socket) return;
       this.#lastReceivedAt = Date.now();
       this.#options.onMessage?.((event as { data?: unknown } | null)?.data);
     };
     socket.onclose = (event: unknown) => {
+      if (this.#socket !== socket) return; // stale event from a detached socket
       this.#teardownSocket();
       const info = event as { code?: number; reason?: string } | null;
       this.#lastClose = { code: info?.code, reason: info?.reason };
@@ -380,6 +387,7 @@ export class ReconnectingSocket {
       void this.#handleFailure();
     };
     socket.onerror = (event: unknown) => {
+      if (this.#socket !== socket) return;
       this.#lastError = event ?? this.#lastError;
       this.#options.onError?.(event);
     };
@@ -443,11 +451,39 @@ export class ReconnectingSocket {
     const ms = this.#options.connectTimeoutMs ?? 10_000;
     if (ms <= 0) return;
     this.#connectTimer = setTimeout(() => {
+      const socket = this.#socket;
+      if (!socket) {
+        void this.#handleFailure();
+        return;
+      }
       try {
-        this.#socket?.close(4002, 'connect timeout');
+        socket.close(4002, 'connect timeout');
       } catch {
         void this.#handleFailure();
+        return;
       }
+      // The standard close() cannot abort an in-flight handshake — per the
+      // WHATWG spec it only closes the connection once it is established,
+      // so a server that accepts TCP but never completes the upgrade never
+      // fires onclose. (`ws` aborts immediately; the global constructor
+      // does not.) Force recovery after a grace period: terminate `ws`
+      // sockets outright, then detach the socket and run the failure path
+      // so reconnection proceeds either way. Stale events from the zombie
+      // socket are ignored by the `#wire` guards.
+      this.#connectKillTimer = setTimeout(() => {
+        if (this.#socket !== socket) return; // onclose already ran
+        const terminate = (socket as { terminate?: () => void }).terminate;
+        if (typeof terminate === 'function') {
+          try {
+            terminate.call(socket);
+          } catch {
+            /* ignore */
+          }
+        }
+        this.#lastClose = { code: 4002, reason: 'connect timeout' };
+        this.#teardownSocket();
+        void this.#handleFailure();
+      }, 250);
     }, ms);
   }
 
@@ -514,6 +550,10 @@ export class ReconnectingSocket {
     if (this.#connectTimer) {
       clearTimeout(this.#connectTimer);
       this.#connectTimer = null;
+    }
+    if (this.#connectKillTimer) {
+      clearTimeout(this.#connectKillTimer);
+      this.#connectKillTimer = null;
     }
     if (this.#heartbeatTimer) {
       clearInterval(this.#heartbeatTimer);
