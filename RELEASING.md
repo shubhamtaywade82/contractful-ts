@@ -90,7 +90,7 @@ either one command or fully automatic once the `NPM_TOKEN` secret exists.
 | --- | --- |
 | `npm run build` (strict `tsc`) | type errors in `src/`, broken declaration emit |
 | `npm run typecheck` | same, plus the compile-time test contracts in `tests/types/` (inference regressions) |
-| `npx vitest run` (408 tests) | behavior: validation, retry safety, wire formats, events runtime, codegen round-trips, the e2e ticket demo, real-transport boundary (local HTTP server), lifecycle/cancellation races, malformed-spec rejection |
+| `npx vitest run` (433 tests) | behavior: validation, retry safety, wire formats, events runtime, codegen round-trips, the e2e ticket demo, real-transport boundaries (local HTTP server **and** a real `ws` server for the events/graphql-transport-ws runtimes, plus a browser-shaped `WebSocket` adapter), lifecycle/cancellation races, malformed-spec rejection |
 | tarball smoke test | packaging: `files`/`exports` completeness, the installed bin symlink, declaration resolution from the artifact, CLI execution from `node_modules/.bin` |
 
 The tarball smoke test exists because unit tests run against source and

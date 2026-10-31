@@ -4,7 +4,9 @@
  *
  * The default factory prefers a global `WebSocket` (browsers, Node 22+,
  * Deno, Bun) and lazily `import('ws')` otherwise — `ws` stays an optional
- * peer dependency, never a hard one.
+ * peer dependency, never a hard one. The only exception: upgrade-request
+ * headers, which the standard constructor cannot carry, route through `ws`
+ * when it is available (Node).
  */
 
 import { EventsConnectionError, EventsError, WebSocketApiError } from '../errors.js';
@@ -53,13 +55,24 @@ export async function resolveWebSocketCtor(): Promise<WebSocketCtor> {
 /**
  * Default factory: browser/Node-22+ global `WebSocket`, else a lazily
  * imported `ws`. Works in bundles and browsers without pulling `ws` in.
+ *
+ * Upgrade headers are the one capability the browser-standard constructor
+ * does not have: when auth material asks for them, the factory prefers a
+ * lazily imported `ws` (Node only), so header auth works on Node 22+ too.
+ * In a browser (no `ws`) the headers are dropped — upgrade headers cannot
+ * be set client-side there by design; use query/subprotocol/connect-message
+ * auth in the browser.
  */
 export const defaultSocketFactory: SocketFactory = async (url, protocols, init) => {
+  const headers = init?.headers;
+  if (headers && Object.keys(headers).length > 0) {
+    const nodeCtor = await loadNodeWs();
+    if (nodeCtor) {
+      return new nodeCtor(url, protocols.length > 0 ? protocols : undefined, { headers });
+    }
+  }
   const Ctor = await resolveWebSocketCtor();
-  // `ws` accepts (url, protocols, options) and honors options.headers;
-  // the browser constructor simply ignores the extra argument.
-  const extra = init?.headers && Object.keys(init.headers).length > 0 ? { headers: init.headers } : undefined;
-  return new Ctor(url, protocols.length > 0 ? protocols : undefined, extra);
+  return new Ctor(url, protocols.length > 0 ? protocols : undefined, undefined);
 };
 
 /* -------------------------------------------------------------------------- */

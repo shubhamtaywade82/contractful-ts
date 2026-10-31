@@ -139,15 +139,34 @@ function pickServerUrl(spec: OpenApiSpec, major: 2 | 3): string {
   for (const server of entries) {
     const protocol = typeof server.protocol === 'string' ? server.protocol : '';
     if (protocol !== 'ws' && protocol !== 'wss' && protocol !== 'websocket') continue;
-    const url = major === 3 ? hostToUrl(server) : String(server.url ?? '');
+    const url = major === 3 ? hostToUrl(server) : substituteServerVariables(String(server.url ?? ''), server);
     if (url) return url;
   }
   const first = entries[0];
   if (first) {
-    const url = major === 3 ? hostToUrl(first) : String(first.url ?? '');
+    const url = major === 3 ? hostToUrl(first) : substituteServerVariables(String(first.url ?? ''), first);
     if (url) return url;
   }
   return 'wss://example.com';
+}
+
+/**
+ * Fills `{variable}` templates in a server URL from each variable's
+ * `default` (the AsyncAPI server-variables convention). Variables without a
+ * default are left in place — a visible, greppable marker rather than a
+ * silently broken URL.
+ */
+function substituteServerVariables(url: string, server: JsonRecord): string {
+  const variables = (server.variables ?? {}) as JsonRecord;
+  if (typeof variables !== 'object' || variables === null) return url;
+  return url.replace(/\{([^}]+)\}/g, (template, name: string) => {
+    const variable = variables[name];
+    if (typeof variable === 'object' && variable !== null) {
+      const fallback = (variable as JsonRecord).default;
+      if (typeof fallback === 'string' && fallback.length > 0) return fallback;
+    }
+    return template;
+  });
 }
 
 /** Last segment of a local $ref pointer (`#/channels/order` → `order`). */
@@ -159,8 +178,9 @@ function refTail(ref: unknown): string | undefined {
 
 function hostToUrl(server: JsonRecord): string {
   // AsyncAPI 3.x servers use `host` without scheme; 2.x uses full `url`.
-  const host = typeof server.host === 'string' ? server.host : '';
-  if (!host) return String(server.url ?? '');
+  const rawHost = typeof server.host === 'string' ? server.host : '';
+  if (!rawHost) return substituteServerVariables(String(server.url ?? ''), server);
+  const host = substituteServerVariables(rawHost, server);
   if (/^wss?:\/\//i.test(host)) return host;
   const protocol = typeof server.protocol === 'string' && server.protocol.startsWith('ws')
     ? server.protocol
@@ -230,7 +250,8 @@ function buildV2Channels(
     ] as const) {
       const operation = channel[key];
       if (typeof operation !== 'object' || operation === null) continue;
-      const messages = messagesFromV2Operation(operation as JsonRecord);
+      const operationRecord = operation as JsonRecord;
+      const messages = messagesFromV2Operation(operationRecord);
       emitChannelMethods({
         topic,
         direction,
@@ -245,6 +266,12 @@ function buildV2Channels(
         group,
         usedNames,
         naming,
+        // 2.x `operationId` is the operation's stable name — same role as the
+        // 3.x operation key.
+        methodName:
+          typeof operationRecord.operationId === 'string' && operationRecord.operationId.length > 0
+            ? operationRecord.operationId
+            : undefined,
       });
     }
   }

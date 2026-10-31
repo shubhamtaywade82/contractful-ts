@@ -386,15 +386,18 @@ The runtime underneath is production-shaped, not a thin wrapper:
 - **Heartbeats** with a liveness timeout that force-closes dead connections.
 - **Topic routing** — exact topics, `:param` patterns (`order/:id/created`), single-segment `*` and the global `*` wildcard.
 - **Envelopes are configurable** — the default is JSON `{ topic, payload }`; swap `publishEnvelope` / `topicExtractor` / `payloadExtractor` for Socket.IO-style `{ event, data }` or anything else, and inject a `socketFactory` to adapt any transport.
-- **Every auth mode that matters** — `query`, `subprotocol`, `connect-message`, `ticket` (one-time ticket via `tokenProvider`) and `header` (Node `ws` / custom factories only), plus a full `authProvider` integration where `getAuth({ transport: 'websocket', ... })` decides the material per (re)connection. Browsers cannot set headers on the WebSocket upgrade — the browser-safe modes are the defaults.
+- **Every auth mode that matters** — `query`, `subprotocol`, `connect-message`, `ticket` (one-time ticket via `tokenProvider`) and `header` (works through the default factory on Node whenever the optional `ws` peer is installed — including Node 22+, where the built-in `WebSocket` cannot set upgrade headers), plus a full `authProvider` integration where `getAuth({ transport: 'websocket', ... })` decides the material per (re)connection. Browsers cannot set headers on the WebSocket upgrade — the browser-safe modes are the defaults.
 - **Close-code policy** — private-use codes are convention: `4001` (token expired) triggers `authProvider.handleUnauthorized` and reconnects only on a successful refresh; `4003` / `4004` surface as a terminal `WebSocketApiError` without retrying. `onAuthStateChanged` proactively reconnects with fresh credentials before the server notices an expiry.
 - **Server-side subscriptions** — set `subscribeEnvelope` / `unsubscribeEnvelope` and every registered pattern is (re)sent after each reconnect from the refcounted registry.
 - **Event ids** — envelopes carrying `.id` / `.eventId` are tracked in `getLastEventId()` and handed to handlers via `ctx.eventId`, so you can catch up over REST after a disconnect (`GET /events?since=<lastId>`). Don't assume exactly-once delivery; make consumers idempotent.
 - The low-level `EventsClient` and `ReconnectingSocket` are exported for direct use; `ws` is loaded lazily as an optional peer in Node. Socket.IO users inject `socketFactory: () => io(url)` and map envelopes through `topicExtractor` / `publishEnvelope`.
+- **Browser compatibility is pinned by tests.** The runtime is driven through a class exposing only the browser-standard `WebSocket` surface — `new WebSocket(url, protocols)`, the four `on*` handlers, `send` and `close(code, reason)` — against a real server, so any accidental reliance on `ws`-only APIs (`.terminate()`, upgrade options, socket events) fails CI. In the browser the default factory uses the global constructor; upgrade-header auth falls back to query/subprotocol/connect-message modes there.
 
 Invalid incoming messages surface as `MessageShapeError` through `onError` (or your own `onInvalidMessage` hook) without dropping the connection.
 
 GraphQL subscriptions work too — `createGraphQLWsClient` speaks the `graphql-transport-ws` protocol (connection_init/ack, id-correlated next/error/complete, ping/pong, resubscribe after reconnect) on the same socket machinery.
+
+Both runtimes are additionally tested against a **real `ws` server** on the loopback interface — genuine TCP, frames and close codes, abnormal-drop reconnection, heartbeat liveness timeouts, the 4001 token-expiry refresh cycle, a TCP server that never completes the upgrade, and the full graphql-transport-ws handshake/stream/reconnect cycle — not only against scripted fakes.
 
 ## The unified platform facade
 
@@ -627,7 +630,7 @@ for (const file of bundle.files) console.log(file.path, file.content.length);
 
 - [`examples/ticket-demo/`](examples/ticket-demo/) — **end-to-end**: REST + WebSocket sharing one ticket authority (token manager → one-time WS tickets → 401/4001 recovery → REST catch-up), fully deterministic against an in-process mock server; covered by `tests/ticket-demo.test.ts`
 - [`examples/github/github.ts`](examples/github/github.ts) — public API, cursor pagination, closed-schema demos
-- [`examples/binance/binance.ts`](examples/binance/binance.ts) — Binance-style spot connector: HMAC-SHA256 request signing via `beforeRequest` with known-answer test vectors, `X-MBX-APIKEY`, rate limiting, query-string signed POST orders and no auto-retry on ambiguous order failures (run: `node examples/binance/binance.ts`)
+- [`examples/binance/binance.ts`](examples/binance/binance.ts) — Binance-style spot connector: HMAC-SHA256 request signing via `beforeRequest` with known-answer test vectors, `X-MBX-APIKEY`, rate limiting, query-string signed POST orders and no auto-retry on ambiguous order failures (run: `node examples/binance/binance.ts`). To verify the signing path against a **real** server, create free testnet keys at [testnet.binance.vision](https://testnet.binance.vision) and run `BINANCE_TESTNET_KEY=... BINANCE_TESTNET_SECRET=... node scripts/binance-testnet-check.mjs` — or `npx vitest run tests/binance-testnet.test.ts` with the same env (the suite skips itself when the env is absent, keeping CI hermetic).
 - [`examples/openapi/petstore.yaml`](examples/openapi/petstore.yaml) + `examples/openapi/generated/` — spec and generated connector
 - [`examples/multi-format/`](examples/multi-format/) — OpenAPI + AsyncAPI + Postman + GraphQL in one `codegen.json` run, with strict-tsc-checked generated output
 
@@ -643,7 +646,7 @@ src/
   middleware/   auth resolvers, retry policy, circuit breaker, rate limiter
   codegen/      format detection, canonical model, OpenAPI/AsyncAPI/Postman/
                 GraphQL adapters, TS emitters (runtime + standalone), CLI
-tests/          vitest suite (408 tests — unit + round-trips + retry-safety, OpenAPI
+tests/          vitest suite (433 tests — unit + round-trips + retry-safety, OpenAPI
                 wire-format and signing regressions + the e2e ticket demo +
                 real-server transport boundary, lifecycle/cancellation races,
                 malformed-spec rejection and generator round-trip determinism);
@@ -662,6 +665,8 @@ npm test            # build + vitest run
 ```
 
 The test suite covers validation, path building, response classification, retry/backoff math, method-aware retry safety (non-idempotent requests are never auto-replayed; idempotency keys stay stable across attempts), circuit state transitions, rate pacing, auth (including the 401-refresh path and the client-credentials provider), the full DSL pipeline through a mock transport, the YAML parser against realistic OpenAPI documents, the events runtime against a scripted fake socket (reconnects, heartbeats, auth modes, routing), the graphql-transport-ws protocol, every format adapter, multi-source configs, codegen round-trips that import generated files and run them — including strict `tsc` checks of generated output — OpenAPI wire-format regressions (parameter inheritance, formData, required bodies, raw scalar/array bodies, recursive refs, combinators), the Binance signing example against known-answer vectors, and an end-to-end ticket-authentication demo (`examples/ticket-demo/`) that runs the full REST + WS lifecycle against an in-process mock server.
+
+Beyond the fakes: the events and graphql-transport-ws runtimes are exercised against a **real `ws` server** over loopback TCP (frames, close codes, abnormal-drop reconnection with resubscription, heartbeat liveness timeouts, the 4001 refresh cycle, header/query/subprotocol auth on real upgrade requests, a never-upgrading TCP server, and the graphql handshake/stream/reconnect cycle); a browser-shaped `WebSocket` adapter (standard surface only) pins browser compatibility; AsyncAPI edge cases cover 2.x `operationId`, server-URL variables, `$ref`'d messages/parameters and bidirectional channels; and an opt-in live suite verifies Binance request signing against the public testnet (`tests/binance-testnet.test.ts`, skipped without `BINANCE_TESTNET_KEY`/`BINANCE_TESTNET_SECRET`).
 
 ## License
 
