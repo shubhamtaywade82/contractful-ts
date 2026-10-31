@@ -20,7 +20,10 @@ describe('RateLimiter', () => {
     await limiter.acquire();
     await limiter.acquire();
     await limiter.acquire();
-    expect(Date.now() - t0).toBeLessThan(20);
+    // A pacing wait would cost ~1/rate = 100ms per slot — the bound just
+    // needs to stay far below that while tolerating scheduler noise on a
+    // busy CI runner.
+    expect(Date.now() - t0).toBeLessThan(60);
   });
 
   it('processes concurrent acquires strictly in order', async () => {

@@ -430,16 +430,18 @@ describe('full pipeline over the default (axios) transport', () => {
 
     const Api = defineApi({
       base: server.url,
+      // jitter: 'none' keeps the backoff exact — full jitter draws uniformly
+      // from [0, maxDelay), so a small draw can fire the retry before the
+      // 80ms abort lands and flake the attempt count below. NOTE: `retry`
+      // is a defineApi-level option, not a constructor option.
+      retry: { jitter: 'none' },
       contracts: {
         flaky: contract('GET /flaky', { responds: [{ status: 200, type: 'hash' }] }),
       },
     });
 
     const controller = new AbortController();
-    // jitter: 'none' keeps the 5s backoff exact — full jitter draws uniformly
-    // from [0, 5s), so a small draw can fire the retry before the 80ms abort
-    // lands and flake the attempt count below.
-    const client = new Api({ retry: { jitter: 'none' } });
+    const client = new Api();
     const pending = client.flaky({ _retries: 1, _retryDelay: 5_000, _signal: controller.signal });
     setTimeout(() => controller.abort(), 80);
 

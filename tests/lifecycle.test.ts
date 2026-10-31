@@ -179,13 +179,15 @@ describe('cancellation through the pipeline', () => {
     const transport = new DeferredTransport();
     const Api = defineApi({
       base: 'https://api.test',
-      // jitter: 'none' keeps the 60s backoff exact — with the default full
-      // jitter the delay is uniform in [0, 60s), so a tiny random draw can
-      // fire the retry before this test's abort lands (observed once on a
-      // slow CI runner) and flake the attempt count.
+      // jitter: 'none' keeps the backoff exact — with the default full
+      // jitter the delay is uniform in [0, maxDelay), so a tiny random draw
+      // can fire the retry before this test's abort lands and flake the
+      // attempt count. NOTE: `retry` is a defineApi-level option; the
+      // constructor only accepts the `retries`/`retryDelay` scalars.
+      retry: { jitter: 'none' },
       contracts: { ping: contract('GET /ping', { responds: [{ status: 200, type: 'hash' }] }) },
     });
-    const client = new Api({ transport, retry: { jitter: 'none' } });
+    const client = new Api({ transport });
 
     const controller = new AbortController();
     const startedAt = Date.now();
