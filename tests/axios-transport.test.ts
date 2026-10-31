@@ -436,7 +436,10 @@ describe('full pipeline over the default (axios) transport', () => {
     });
 
     const controller = new AbortController();
-    const client = new Api();
+    // jitter: 'none' keeps the 5s backoff exact — full jitter draws uniformly
+    // from [0, 5s), so a small draw can fire the retry before the 80ms abort
+    // lands and flake the attempt count below.
+    const client = new Api({ retry: { jitter: 'none' } });
     const pending = client.flaky({ _retries: 1, _retryDelay: 5_000, _signal: controller.signal });
     setTimeout(() => controller.abort(), 80);
 
