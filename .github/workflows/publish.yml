@@ -1,0 +1,77 @@
+name: Publish
+
+# Called by release-please.yml only. That file must be the trusted-publisher
+# entry on npmjs.com, because trusted publishing validates the calling workflow.
+# Publishes with npm trusted publishing (OIDC): no npm token is used.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'npm dist-tag to publish under'
+        required: false
+        type: string
+        default: 'latest'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify release artifact (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build (tsc, strict)
+        run: npm run build
+      - name: Typecheck (src + compile-time test contracts)
+        run: npm run typecheck
+      - name: Test (vitest)
+        run: npx vitest run
+
+  publish:
+    name: npm publish
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Pin npm for trusted publishing
+        run: npm install -g npm@^11.21.0
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      # Gates the package's prepublishOnly used to run (build, typecheck, vitest).
+      # The publish below uses --ignore-scripts, so they run here instead.
+      - name: Build
+        run: npm run build
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Test
+        run: npx vitest run
+      - name: Publish to npm (trusted publishing)
+        env:
+          NPM_DIST_TAG: ${{ inputs.tag || 'latest' }}
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          # Re-running is safe: a version already on npm is skipped instead of failing E409.
+          if npm view "contractful-ts@${VERSION}" version >/dev/null 2>&1; then
+            echo "contractful-ts@${VERSION} is already on npm — skipping publish."
+            exit 0
+          fi
+          npm publish --access public --provenance --tag "$NPM_DIST_TAG" --ignore-scripts
