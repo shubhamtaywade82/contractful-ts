@@ -4,7 +4,7 @@ on:
   push:
     tags: ['v*']
   # Manual re-release of an existing tag — no tag deletion/re-push needed
-  # (e.g. when NPM_TOKEN was missing or the registry hiccuped on first run).
+  # (e.g. when the registry hiccuped on the first run).
   workflow_dispatch:
     inputs:
       tag:
@@ -102,6 +102,9 @@ jobs:
     name: GitHub Release + npm publish
     needs: [resolve, verify]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -111,13 +114,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build
         run: npm run build
+
+      # Gates the package's prepublishOnly used to run (build, typecheck, vitest).
+      # The publish below uses --ignore-scripts, so they run here instead.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npx vitest run
 
       - name: Pack tarball for the release assets
         run: npm pack
@@ -130,29 +140,23 @@ jobs:
           files: contractful-ts-*.tgz
           tag_name: ${{ needs.resolve.outputs.tag }}
 
-      # Publishes only when the NPM_TOKEN secret is configured; otherwise
-      # the draft release reminds you to publish manually (see RELEASING.md).
-      # (The secrets context cannot be referenced from a step-level `if:`
-      # expression, so the guard lives in the shell.) Re-running the workflow
-      # is safe: a version already on npm is skipped instead of failing E409.
-      - name: Publish to npm (when NPM_TOKEN is configured)
+      # Publishes via npm trusted publishing (OIDC): no npm token. The
+      # trusted-publisher entry on npmjs.com must name `release.yml`. Re-running
+      # the workflow is safe: a version already on npm is skipped instead of
+      # failing E409.
+      - name: Publish to npm (trusted publishing)
         env:
           SKIP_PUBLISH: ${{ inputs.skip_publish }}
           VERSION: ${{ needs.resolve.outputs.version }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -euo pipefail
           if [ "$SKIP_PUBLISH" = "true" ]; then
             echo "skip_publish requested — draft release only."
-            exit 0
-          fi
-          if [ -z "${NPM_TOKEN:-}" ]; then
-            echo "NPM_TOKEN secret is not configured — skipping npm publish."
-            echo "Publish manually per RELEASING.md, then finalize the draft release."
             exit 0
           fi
           if npm view "contractful-ts@${VERSION}" version >/dev/null 2>&1; then
             echo "contractful-ts@${VERSION} is already on npm — skipping publish (idempotent re-release)."
             exit 0
           fi
-          npm publish --access public
+          npm install -g npm@^11.21.0
+          npm publish --access public --provenance --ignore-scripts
